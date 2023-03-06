@@ -53,6 +53,9 @@ class TerraformCommand(BaseCommand):
         self._deployment = kwargs["deployment"]
         self._force = self._resolve_arg("force")
         self._show_output = self._resolve_arg("show_output")
+        # streaming doesn't allow for distinction between stderr and stdout, but allows
+        # terraform operations to be viewed before the process is completed
+        self._stream_output = self._resolve_arg("stream_output")
         self._terraform_modules_dir = self._resolve_arg("terraform_modules_dir")
 
     @property
@@ -274,10 +277,10 @@ class TerraformCommand(BaseCommand):
             f"{self._terraform_bin} {command} {command_params}",
             cwd=working_dir,
             env=env,
-            stream_output=True
+            stream_output=self._stream_output
         )
-        if debug:
-            click.secho(f"exit code: {exit_code}", fg="blue")
+        click.secho(f"exit code: {exit_code}", fg="blue")
+        if debug and not self._stream_output:
             for line in stdout.decode().splitlines():
                 click.secho(f"stdout: {line}", fg="blue")
             for line in stderr.decode().splitlines():
