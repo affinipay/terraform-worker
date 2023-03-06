@@ -14,8 +14,8 @@
 import os
 import shlex
 import subprocess
-import click
 
+import click
 
 ### FIRST COMMAND IN PIPE NOT GETTING STDIN INPUT :(
 
@@ -85,20 +85,20 @@ def pipe_exec(args, stdin=None, cwd=None, env=None, stream_output=False):
         # if there is more than one command we need to use communicate on the first to send
         # in stdin and still allowing the pipeline to properly process
         if len(commands) > 1:
-                # communicate in this instance needs a string type object, not bytes
-                communicate_kwargs["input"] = stdin
-                commands[0].communicate(**communicate_kwargs)
+            # communicate in this instance needs a string type object, not bytes
+            communicate_kwargs["input"] = stdin
+            commands[0].communicate(**communicate_kwargs)
 
         else:
             # if it's just a single command we can not use communicate or we will not be able
             # to stream the output, so write directly to stdin
             if stdin is not None and len(commands) == 1:
-                commands[0].stdin.write(stdin + '\n')
+                commands[0].stdin.write(stdin + "\n")
                 commands[0].stdin.close()
 
         # for a single command this will be the only command, for a pipeline reading from the
         # last command will trigger all of the commands, communicating through their pipes
-        for line in iter(commands[-1].stdout.readline,''):
+        for line in iter(commands[-1].stdout.readline, ""):
             click.secho(line.rstrip())
             stdout += line
 

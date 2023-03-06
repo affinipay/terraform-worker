@@ -277,7 +277,7 @@ class TerraformCommand(BaseCommand):
             f"{self._terraform_bin} {command} {command_params}",
             cwd=working_dir,
             env=env,
-            stream_output=self._stream_output
+            stream_output=self._stream_output,
         )
         click.secho(f"exit code: {exit_code}", fg="blue")
         if debug and not self._stream_output:

@@ -55,7 +55,7 @@ class TestUtilSystem:
                 None,
                 "",
                 "/bin/cat: /yisohwo0AhK8Ah: No such file or directory",
-                False
+                False,
             ),
             (
                 "/bin/cat /yisohwo0AhK8Ah ",
@@ -64,10 +64,26 @@ class TestUtilSystem:
                 None,
                 "",
                 "/bin/cat: /yisohwo0AhK8Ah: No such file or directory",
-                True
+                True,
             ),
-            (["/bin/echo foo", "/usr/bin/env grep foo"], 0, None, None, "foo", "", False),
-            (["/bin/echo foo", "/usr/bin/env grep foo"], 0, None, None, "foo", "", True),
+            (
+                ["/bin/echo foo", "/usr/bin/env grep foo"],
+                0,
+                None,
+                None,
+                "foo",
+                "",
+                False,
+            ),
+            (
+                ["/bin/echo foo", "/usr/bin/env grep foo"],
+                0,
+                None,
+                None,
+                "foo",
+                "",
+                True,
+            ),
             (["/bin/echo foo", "/usr/bin/env grep bar"], 1, None, None, "", "", False),
             (["/bin/echo foo", "/usr/bin/env grep bar"], 1, None, None, "", "", True),
             (["/bin/cat", "/usr/bin/env grep foo"], 0, None, "foo", "foo", "", False),
@@ -75,7 +91,9 @@ class TestUtilSystem:
         ],
     )
     @pytest.mark.timeout(2)
-    def test_pipe_exec(self, commands, exit_code, cwd, stdin, stdout, stderr, stream_output):
+    def test_pipe_exec(
+        self, commands, exit_code, cwd, stdin, stdout, stderr, stream_output
+    ):
         (return_exit_code, return_stdout, return_stderr) = pipe_exec(
             commands, cwd=cwd, stdin=stdin, stream_output=stream_output
         )
