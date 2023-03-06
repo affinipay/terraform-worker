@@ -231,8 +231,6 @@ class TerraformCommand(BaseCommand):
         for auth in self._authenticators:
             env.update(auth.env())
 
-        # env["TF_PLUGIN_CACHE_DIR"] = f"{self._temp_dir}/terraform-plugins"
-
         working_dir = f"{self._temp_dir}/definitions/{definition.tag}"
         command_params = params.get(command)
         if not command_params:
@@ -276,6 +274,7 @@ class TerraformCommand(BaseCommand):
             f"{self._terraform_bin} {command} {command_params}",
             cwd=working_dir,
             env=env,
+            stream_output=True
         )
         if debug:
             click.secho(f"exit code: {exit_code}", fg="blue")
