@@ -280,11 +280,24 @@ class TerraformCommand(BaseCommand):
             stream_output=self._stream_output,
         )
         click.secho(f"exit code: {exit_code}", fg="blue")
+
         if debug and not self._stream_output:
             for line in stdout.decode().splitlines():
                 click.secho(f"stdout: {line}", fg="blue")
             for line in stderr.decode().splitlines():
                 click.secho(f"stderr: {line}", fg="red")
+
+        # If a plan file was saved, write the plan output
+        if plan_file is not None:
+            plan_log = f"{os.path.splitext(plan_file)[0]}.log"
+
+            with open(plan_log, 'w') as pl:
+                pl.write("STDOUT:\n")
+                for line in stdout.decode().splitlines():
+                    pl.write(f"{line}\n")
+                pl.write("\nSTDERR:\n")
+                for line in stderr.decode().splitlines():
+                    pl.write(f"{line}\n")
 
         # special handling of the exit codes for "plan" operations
         if command == "plan":
