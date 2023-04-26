@@ -58,7 +58,6 @@ class BaseProvider:
             result.append("  }")
 
         result.append("}")
-        debugstr = "\n".join(result)
         return "\n".join(result)
 
     def required(self):
