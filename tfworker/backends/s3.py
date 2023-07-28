@@ -125,9 +125,6 @@ class S3Backend(BaseBackend):
                     # just append the last part of the prefix to the list
                     self._bucket_files.add(key["Key"].split("/")[-2])
 
-        # print (self._authenticator.bucket)
-        # print (self._authenticator.prefix)
-
     def remotes(self) -> list:
         """ return a list of the remote bucket keys """
         return list(self._bucket_files)
