@@ -161,6 +161,7 @@ class RootCommand:
         def template_items(self, return_as_dict=False, get_env=False):
             rvals = {}
             for k, v in self.__dict__.items():
+                click.secho(f"DEBUG: processing {k}={v}", fg="blue")
                 if k == "config_var":
                     try:
                         rvals["var"] = get_config_var_dict(v)
