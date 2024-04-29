@@ -23,3 +23,6 @@ class BaseHandler(metaclass=ABCMeta):
             kwargs: any additional arguments that may be required
         """
         pass
+
+    def __str__(self):
+        return self.__class__.__name__
