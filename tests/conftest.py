@@ -94,8 +94,8 @@ class MockAWSAuth:
 
     @mock_aws
     def __init__(self):
-        self._session = boto3.Session()
-        self._backend_session = self._session
+        self._session = boto3.Session(region_name="us-east-1")
+        self._backend_session = boto3.Session(region_name="us-west-2")
         self.bucket = "test_bucket"
         self.prefix = "terraform/test-0001"
 
