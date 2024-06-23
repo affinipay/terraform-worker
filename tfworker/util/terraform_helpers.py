@@ -2,18 +2,20 @@ import json
 import os
 import pathlib
 from tempfile import TemporaryDirectory
-from typing import Dict, List, Union
+from typing import TYPE_CHECKING, Dict, List, Union
 
-import click
 import hcl2
 from lark.exceptions import UnexpectedToken
 
-from tfworker.providers.providers_collection import ProvidersCollection
-from tfworker.types import ProviderGID
+import tfworker.util.log as log
 from tfworker.util.system import get_platform
 
+if TYPE_CHECKING:
+    from tfworker.providers.collection import ProvidersCollection
+    from tfworker.providers.model import ProviderGID, ProviderRequirements
 
-def _not_in_cache(gid: ProviderGID, version: str, cache_dir: str) -> bool:
+
+def _not_in_cache(gid: "ProviderGID", version: str, cache_dir: str) -> bool:
     """
     Check if the provider is not in the cache directory.
 
@@ -40,7 +42,7 @@ def _not_in_cache(gid: ProviderGID, version: str, cache_dir: str) -> bool:
     return False
 
 
-def _get_cached_hash(gid: ProviderGID, version: str, cache_dir: str) -> str:
+def _get_cached_hash(gid: "ProviderGID", version: str, cache_dir: str) -> str:
     """
     Get the hash of the cached provider.
 
@@ -65,7 +67,7 @@ def _get_cached_hash(gid: ProviderGID, version: str, cache_dir: str) -> str:
 
 
 def _write_mirror_configuration(
-    providers: ProvidersCollection, working_dir: str, cache_dir: str
+    providers: "ProvidersCollection", working_dir: str, cache_dir: str
 ) -> TemporaryDirectory:
     """
     Write the mirror configuration to a temporary directory in the working directory.
@@ -80,10 +82,17 @@ def _write_mirror_configuration(
     Raises:
         IndexError: If there are no providers to mirror.
     """
-    includes = [x.tag for x in providers if _not_in_cache(x.gid, x.version, cache_dir)]
+    includes = [
+        x.name
+        for x in providers.values()
+        if _not_in_cache(x.gid, x.config.requirements.version, cache_dir)
+    ]
+    log.trace(f"Providers to mirror: {includes}")
+
     if len(includes) == 0:
         raise IndexError("No providers to mirror")
 
+    log.info(f"mirroring providers: {', '.join(includes)}")
     mirror_configuration = _create_mirror_configuration(
         providers=providers, includes=includes
     )
@@ -95,7 +104,7 @@ def _write_mirror_configuration(
 
 
 def _create_mirror_configuration(
-    providers: ProvidersCollection, includes: List[str] = []
+    providers: "ProvidersCollection", includes: List[str] = []
 ) -> str:
     """
     Generate a terraform configuration file with all of the providers
@@ -108,32 +117,7 @@ def _create_mirror_configuration(
     return "\n".join(tf_string)
 
 
-def _validate_cache_dir(cache_dir: str) -> None:
-    """
-    Validate the cache directory, it should exist and be writable.
-
-    Args:
-        cache_dir (str): The cache directory.
-    """
-    cache_dir = pathlib.Path(cache_dir)
-    if not cache_dir.exists():
-        click.secho(f"Cache directory {cache_dir} does not exist", fg="red")
-        raise SystemExit(1)
-    if not cache_dir.is_dir():
-        click.secho(f"Cache directory {cache_dir} is not a directory", fg="red")
-        raise SystemExit(1)
-    if not os.access(cache_dir, os.W_OK):
-        click.secho(f"Cache directory {cache_dir} is not writable", fg="red")
-        raise SystemExit(1)
-    if not os.access(cache_dir, os.R_OK):
-        click.secho(f"Cache directory {cache_dir} is not readable", fg="red")
-        raise SystemExit(1)
-    if not os.access(cache_dir, os.X_OK):
-        click.secho(f"Cache directory {cache_dir} is not executable", fg="red")
-        raise SystemExit(1)
-
-
-def _get_provider_cache_dir(gid: ProviderGID, cache_dir: str) -> str:
+def _get_provider_cache_dir(gid: "ProviderGID", cache_dir: str) -> str:
     """
     Get the cache directory for a provider.
 
@@ -166,7 +150,9 @@ def _parse_required_providers(content: dict) -> Union[None, Dict[str, Dict[str, 
     return providers
 
 
-def _find_required_providers(search_dir: str) -> Dict[str, [Dict[str, str]]]:
+def _find_required_providers(
+    search_dir: str,
+) -> Dict[str, Dict[str, "ProviderRequirements"]]:
     providers = {}
     for root, _, files in os.walk(search_dir, followlinks=True):
         for file in files:
@@ -175,9 +161,15 @@ def _find_required_providers(search_dir: str) -> Dict[str, [Dict[str, str]]]:
                     try:
                         content = hcl2.load(f)
                     except UnexpectedToken as e:
-                        click.secho(f"skipping {root}/{file}: {e}", fg="blue")
+                        log.info(
+                            f"not processing {root}/{file} for required providers; see debug output for HCL parsing errors"
+                        )
+                        log.debug(f"HCL processing errors in {root}/{file}: {e}")
                         continue
                     new_providers = _parse_required_providers(content)
                     if new_providers is not None:
                         providers.update(new_providers)
+    log.trace(
+        f"Found required providers: {[x for x in providers.keys()]} in {search_dir}"
+    )
     return providers

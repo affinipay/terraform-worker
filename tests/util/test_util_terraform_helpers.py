@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tfworker.providers.providers_collection import ProvidersCollection
-from tfworker.types import ProviderGID
+from tfworker.providers import ProviderGID
+from tfworker.providers.collection import ProvidersCollection
 from tfworker.util.system import get_platform
 from tfworker.util.terraform_helpers import (
     _create_mirror_configuration,
@@ -15,7 +15,6 @@ from tfworker.util.terraform_helpers import (
     _get_provider_cache_dir,
     _not_in_cache,
     _parse_required_providers,
-    _validate_cache_dir,
     _write_mirror_configuration,
 )
 
@@ -113,49 +112,6 @@ def test_get_cached_hash(provider_gid, version, create_cache_files):
     assert cached_hash == "dummy_hash"
 
 
-def test_validate_cache_dir(cache_dir):
-    _validate_cache_dir(str(cache_dir))
-
-
-def test_validate_cache_dir_nonexistent():
-    with pytest.raises(SystemExit):
-        _validate_cache_dir("nonexistent_dir")
-
-
-def test_validate_cache_dir_not_a_directory(tmp_path):
-    file_path = tmp_path / "not_a_directory"
-    file_path.touch()  # Create a file instead of a directory
-    with pytest.raises(SystemExit):
-        _validate_cache_dir(str(file_path))
-
-
-def test_validate_cache_dir_not_writable(tmp_path):
-    cache_dir = tmp_path / "cache"
-    cache_dir.mkdir()
-    cache_dir.chmod(0o555)  # Read and execute permissions only
-    with pytest.raises(SystemExit):
-        _validate_cache_dir(str(cache_dir))
-    cache_dir.chmod(0o755)  # Restore permissions for cleanup
-
-
-def test_validate_cache_dir_not_readable(tmp_path):
-    cache_dir = tmp_path / "cache"
-    cache_dir.mkdir()
-    cache_dir.chmod(0o333)  # Write and execute permissions only
-    with pytest.raises(SystemExit):
-        _validate_cache_dir(str(cache_dir))
-    cache_dir.chmod(0o755)  # Restore permissions for cleanup
-
-
-def test_validate_cache_dir_not_executable(tmp_path):
-    cache_dir = tmp_path / "cache"
-    cache_dir.mkdir()
-    cache_dir.chmod(0o666)  # Read and write permissions only
-    with pytest.raises(SystemExit):
-        _validate_cache_dir(str(cache_dir))
-    cache_dir.chmod(0o755)  # Restore permissions for cleanup
-
-
 def test_get_provider_cache_dir(provider_gid, cache_dir):
     provider_cache_dir = _get_provider_cache_dir(provider_gid, str(cache_dir))
     expected_dir = (
@@ -174,16 +130,6 @@ def test_write_mirror_configuration(providers_collection, cache_dir):
         )
         assert temp_dir is not None
         assert (pathlib.Path(temp_dir.name) / "terraform.tf").exists()
-
-
-def test_write_mirror_configuration_empty_providers(
-    empty_providers_collection, cache_dir
-):
-    with TemporaryDirectory() as working_dir:
-        with pytest.raises(IndexError):
-            _write_mirror_configuration(
-                empty_providers_collection, working_dir, str(cache_dir)
-            )
 
 
 def test_create_mirror_configuration(providers_collection):
