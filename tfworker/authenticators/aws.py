@@ -144,6 +144,14 @@ class AWSAuthenticator(BaseAuthenticator):
             self._backend_session = _get_backend_session(auth_config, init_session)
 
     @property
+    def region(self) -> str:
+        return self._session.region_name
+
+    @property
+    def backend_region(self) -> str:
+        return self._backend_session.region_name
+
+    @property
     def backend_session(self) -> boto3.session:
         return self._backend_session
 

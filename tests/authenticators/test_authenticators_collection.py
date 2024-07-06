@@ -9,12 +9,6 @@ from tfworker.authenticators.collection import AuthenticatorsCollection
 from tfworker.exceptions import UnknownAuthenticator
 
 
-# Mock classes for testing
-class MockCLIOptionsRoot:
-    def model_dump(self):
-        return {}
-
-
 class MockAuthenticatorConfig(BaseAuthenticatorConfig):
     pass
 
@@ -33,24 +27,19 @@ MockAuthenticator.tag = "mock"
 
 
 @pytest.fixture
-def cli_options_root():
-    return MockCLIOptionsRoot()
-
-
-@pytest.fixture
-def authenticators_collection(cli_options_root):
+def authenticators_collection(mock_cli_options_root):
     # Create a fresh instance of ALL for each test
     all_authenticators = [MockAuthenticator]
     with patch("tfworker.authenticators.collection.ALL", all_authenticators):
         AuthenticatorsCollection._instance = None
-        return AuthenticatorsCollection(cli_options_root)
+        return AuthenticatorsCollection(mock_cli_options_root)
 
 
 class TestAuthenticatorsCollection:
 
-    def test_singleton_behavior(self, cli_options_root):
-        instance1 = AuthenticatorsCollection(cli_options_root)
-        instance2 = AuthenticatorsCollection(cli_options_root)
+    def test_singleton_behavior(self, mock_cli_options_root):
+        instance1 = AuthenticatorsCollection(mock_cli_options_root)
+        instance2 = AuthenticatorsCollection(mock_cli_options_root)
         assert instance1 is instance2, "AuthenticatorsCollection should be a singleton"
 
     def test_init_successful_authenticator_creation(self, authenticators_collection):
@@ -58,7 +47,7 @@ class TestAuthenticatorsCollection:
             "mock" in authenticators_collection._authenticators
         ), "Authenticator should be created and added to the collection"
 
-    def test_init_unsuccessful_authenticator_creation(self, cli_options_root):
+    def test_init_unsuccessful_authenticator_creation(self, mock_cli_options_root):
         # Mocking the ValidationError to simulate a configuration failure
         errors = [
             InitErrorDetails(
@@ -76,7 +65,7 @@ class TestAuthenticatorsCollection:
             MockAuthenticator.config_model, "__call__", side_effect=validation_error
         ):
             AuthenticatorsCollection._instance = None
-            authenticators_collection = AuthenticatorsCollection(cli_options_root)
+            authenticators_collection = AuthenticatorsCollection(mock_cli_options_root)
             assert (
                 "mock" not in authenticators_collection._authenticators
             ), "Authenticator with invalid configuration should not be added to the collection"

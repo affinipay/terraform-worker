@@ -34,25 +34,29 @@ def version():
     return "1.0.0"
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def providers_collection():
+    """A ProvidersCollection object with one provider"""
     providers_odict = {
         "provider1": {
             "requirements": {"source": "hashicorp/provider1", "version": "1.0.0"}
         },
     }
-    return ProvidersCollection(
+    yield ProvidersCollection(
         providers_odict=providers_odict,
         authenticators=MagicMock(),
     )
+    ProvidersCollection.delete_instance()
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def empty_providers_collection():
-    return ProvidersCollection(
+    """An empty ProvidersCollection object"""
+    yield ProvidersCollection(
         providers_odict={},
         authenticators=MagicMock(),
     )
+    ProvidersCollection.delete_instance()
 
 
 @pytest.fixture
@@ -128,8 +132,19 @@ def test_write_mirror_configuration(providers_collection, cache_dir):
         temp_dir = _write_mirror_configuration(
             providers_collection, working_dir, str(cache_dir)
         )
+        del providers_collection  # this is a singleton and we need to delete it to test the empty_providers_collection
         assert temp_dir is not None
         assert (pathlib.Path(temp_dir.name) / "terraform.tf").exists()
+
+
+def test_write_mirror_configuration_empty_providers(
+    empty_providers_collection, cache_dir
+):
+    with TemporaryDirectory() as working_dir:
+        with pytest.raises(IndexError):
+            _write_mirror_configuration(
+                empty_providers_collection, working_dir, str(cache_dir)
+            )
 
 
 def test_create_mirror_configuration(providers_collection):
@@ -188,3 +203,28 @@ def test_find_required_providers(tmp_path):
         "provider1": {"source": "hashicorp/provider1", "version": "1.0.0"}
     }
     assert providers == expected_providers
+
+
+def test_find_required_providers_no_providers(tmp_path):
+    tf_content = """
+    terraform {
+    }
+    """
+    test_file = tmp_path / "main.tf"
+    with open(test_file, "w") as f:
+        f.write(tf_content)
+
+    providers = _find_required_providers(str(tmp_path))
+    assert providers == {}
+
+
+def test_find_required_providers_invalid_hcl(tmp_path):
+    tf_content = """
+    tfworker { izgreat! }
+    """
+    test_file = tmp_path / "main.tf"
+    with open(test_file, "w") as f:
+        f.write(tf_content)
+
+    providers = _find_required_providers(str(tmp_path))
+    assert providers == {}

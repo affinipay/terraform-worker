@@ -10,6 +10,7 @@ from tfworker.types.terraform import TerraformAction, TerraformStage
 # Fixture for a mock Terraform state file
 @pytest.fixture
 def mock_terraform_state():
+    """A mock Terraform state file with a single remote state resource"""
     return """
     {
         "version": 4,
@@ -45,6 +46,7 @@ def mock_terraform_state():
 
 @pytest.fixture
 def mock_terraform_locals():
+    """A mock Terraform locals file with two variables"""
     return """locals {
   local_key = data.terraform_remote_state.example.outputs.key
   local_another_key = data.terraform_remote_state.example.outputs.another_key
@@ -237,6 +239,10 @@ class TestHelperFunctions:
 
     @mock.patch("tfworker.util.hooks.pipe_exec")
     def test_execute_hook_script(self, mock_pipe_exec, capsys):
+        import tfworker.util.log as log
+
+        old_log_level = log.log_level
+        log.log_level = log.LogLevel.DEBUG
         mock_pipe_exec.return_value = (0, b"stdout", b"stderr")
         hooks._execute_hook_script(
             "hook_script",
@@ -251,6 +257,7 @@ class TestHelperFunctions:
         )
         captured = capsys.readouterr()
         captured_lines = captured.out.splitlines()
+        log.log_level = old_log_level
         assert len(captured_lines) == 4
         assert "Results from hook script: hook_script" in captured_lines
         assert "exit code: 0" in captured_lines

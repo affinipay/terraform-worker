@@ -1,108 +1,13 @@
-import os
-import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import boto3
 import botocore
-import click
 import pytest
 from moto import mock_aws
 
 import tfworker.util.log as log
 from tfworker.backends.s3 import S3Backend
-from tfworker.cli_options import CLIOptionsRoot
 from tfworker.exceptions import BackendError
-
-log.log_level = log.LogLevel.TRACE
-
-
-@pytest.fixture
-def mock_cli_options_root():
-    mock_root = MagicMock(spec=CLIOptionsRoot)
-    mock_root.region = "us-east-1"
-    mock_root.backend_region = "us-east-1"
-    mock_root.backend_bucket = "test-bucket"
-    mock_root.backend_prefix = "prefix"
-    mock_root.create_backend_bucket = True
-    return mock_root
-
-
-@pytest.fixture
-def mock_cli_options_root_backend_west():
-    mock_root = MagicMock(spec=CLIOptionsRoot)
-    mock_root.region = "us-east-1"
-    mock_root.backend_region = "us-west-2"
-    mock_root.backend_bucket = "west-test-bucket"
-    mock_root.backend_prefix = "prefix"
-    mock_root.create_backend_bucket = True
-    return mock_root
-
-
-@pytest.fixture
-def mock_app_state(mock_cli_options_root):
-    mock_state = MagicMock()
-    mock_state.root_options = mock_cli_options_root
-    mock_state.deployment = "test-deployment"
-    return mock_state
-
-
-@pytest.fixture
-def mock_app_state_backend_west(mock_cli_options_root_backend_west):
-    mock_state = MagicMock()
-    mock_state.root_options = mock_cli_options_root_backend_west
-    mock_state.deployment = "test-deployment"
-    return mock_state
-
-
-@pytest.fixture
-def mock_authenticators():
-    os.environ["AWS_SECRET_ACCESS_KEY"] = "test"
-    os.environ["AWS_ACCESS_KEY_ID"] = "test"
-    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
-
-    mock_auth = MagicMock()
-    mock_auth["aws"].session = boto3.Session()
-    mock_auth["aws"].backend_session = mock_auth["aws"].session
-    mock_auth["aws"].bucket = "test-bucket"
-    mock_auth["aws"].prefix = "prefix"
-    mock_auth["aws"].backend_region = "us-east-1"
-    return mock_auth
-
-
-@pytest.fixture
-def mock_authenticators_backend_west():
-    os.environ["AWS_SECRET_ACCESS_KEY"] = "test"
-    os.environ["AWS_ACCESS_KEY_ID"] = "test"
-    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
-
-    mock_auth = MagicMock()
-    mock_auth["aws"].session = boto3.Session()
-    mock_auth["aws"].backend_session = boto3.Session(region_name="us-west-2")
-    mock_auth["aws"].bucket = "west-test-bucket"
-    mock_auth["aws"].prefix = "prefix"
-    mock_auth["aws"].backend_region = "us-west-2"
-    return mock_auth
-
-
-@pytest.fixture
-def mock_click_context(mock_app_state):
-    ctx = MagicMock(spec=click.Context)
-    ctx.obj = mock_app_state
-    ctx.exit = MagicMock(side_effect=sys.exit)
-    return ctx
-
-
-@pytest.fixture
-def mock_click_context_backend_west(mock_app_state_backend_west):
-    ctx = MagicMock(spec=click.Context)
-    ctx.obj = mock_app_state_backend_west
-    ctx.exit = MagicMock(side_effect=sys.exit)
-    return ctx
-
-
-@pytest.fixture(autouse=True)
-def setup_method(mocker, mock_click_context):
-    mocker.patch("click.get_current_context", return_value=mock_click_context)
 
 
 class TestS3BackendInit:

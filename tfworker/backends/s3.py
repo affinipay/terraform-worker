@@ -75,7 +75,6 @@ class S3Backend(BaseBackend):
         self._s3_client: botocore.client.S3 = (
             self._authenticator.backend_session.client("s3")
         )
-        log.error(f"Backend Region: {self._authenticator.backend_region}")
         self._ensure_locking_table()
         self._ensure_backend_bucket()
         self._bucket_files: list = self._list_bucket_definitions()

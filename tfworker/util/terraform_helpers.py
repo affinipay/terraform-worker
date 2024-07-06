@@ -11,8 +11,13 @@ import tfworker.util.log as log
 from tfworker.util.system import get_platform
 
 if TYPE_CHECKING:
-    from tfworker.providers.collection import ProvidersCollection
-    from tfworker.providers.model import ProviderGID, ProviderRequirements
+    from tfworker.providers.collection import (  # pragma: no cover  # noqa: F401
+        ProvidersCollection,
+    )
+    from tfworker.providers.model import (  # pragma: no cover  # noqa: F401
+        ProviderGID,
+        ProviderRequirements,
+    )
 
 
 def _not_in_cache(gid: "ProviderGID", version: str, cache_dir: str) -> bool:
@@ -87,7 +92,6 @@ def _write_mirror_configuration(
         for x in providers.values()
         if _not_in_cache(x.gid, x.config.requirements.version, cache_dir)
     ]
-    log.trace(f"Providers to mirror: {includes}")
 
     if len(includes) == 0:
         raise IndexError("No providers to mirror")

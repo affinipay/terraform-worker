@@ -9,6 +9,7 @@ REDACTED_ITEMS = ["aws_secret_access_key", "aws_session_token", "aws_profile"]
 
 @pytest.fixture(autouse=True)
 def reset_log_level():
+    """Reset log level to ERROR after each test"""
     log.log_level = log.LogLevel.ERROR
     yield
     log.log_level = log.LogLevel.ERROR
