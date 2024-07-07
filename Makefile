@@ -15,10 +15,13 @@ test: init
 	poetry run pytest -p no:warnings --disable-socket
 	poetry run coverage report --fail-under=60 -m --skip-empty
 
-dep-test: init
+ci-test: init
 	poetry run pytest --disable-socket --junitxml=reports/junit.xml
-	poetry run coverage report --fail-under=60 -m --skip-empty
 	poetry run coverage xml -o reports/coverage.xml
+
+dep-test: init
+	poetry run pytest --disable-socket
+	poetry run coverage report --fail-under=60 -m --skip-empty
 
 clean:
 	@echo "removing python temporary and build files "
