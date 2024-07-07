@@ -338,7 +338,7 @@ class TerraformCommand(BaseCommand):
                 b64_encode=self.terraform_config.b64_encode,
                 debug=self.terraform_config.debug,
                 extra_vars=definition.get_template_vars(
-                    self.app_state.loaded_config.global_vars.template_vars
+                    self.app_state.loaded_config.global_vars.get("template_vars", {})
                 ),
             )
         except HookError as e:
