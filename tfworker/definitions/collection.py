@@ -81,6 +81,12 @@ class DefinitionsCollection(Mapping):
         self._frozen = True
 
     @classmethod
+    def reset(cls):
+        with cls._lock:
+            cls._instance = None
+            cls._frozen = False
+
+    @classmethod
     def __get_pydantic_core_schema__(
         cls, _, handler: GetCoreSchemaHandler
     ) -> CoreSchema:
