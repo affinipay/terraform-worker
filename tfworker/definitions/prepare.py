@@ -91,7 +91,7 @@ class DefinitionPrepare:
         ) as tflocals:
             tflocals.write("locals {\n")
             for k, v in definition.get_remote_vars(
-                global_vars=self._app_state.loaded_config.global_vars.remote_vars
+                global_vars=self._app_state.loaded_config.global_vars.get("remote_vars", {})
             ).items():
                 tflocals.write(f"  {k} = data.terraform_remote_state.{v}\n")
             tflocals.write("}\n\n")
@@ -112,7 +112,7 @@ class DefinitionPrepare:
             "w+",
         ) as varfile:
             for k, v in definition.get_terraform_vars(
-                global_vars=self._app_state.loaded_config.global_vars.terraform_vars
+                global_vars=self._app_state.loaded_config.global_vars.get("terraform_vars", {})
             ).items():
                 varfile.write(f"{k} = {vars_typer(v)}\n")
 
@@ -207,7 +207,7 @@ class DefinitionPrepare:
         """
         definition: "Definition" = self._app_state.definitions[name]
         template_vars = definition.get_template_vars(
-            self._app_state.loaded_config.global_vars.template_vars
+            self._app_state.loaded_config.global_vars.get("template_vars", {})
         ).copy()
 
         for item in self._app_state.root_options.config_var:
