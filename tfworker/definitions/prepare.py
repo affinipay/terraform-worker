@@ -66,7 +66,7 @@ class DefinitionPrepare:
             copy(
                 copier=c,
                 destination=definition.get_target_path(self._app_state.working_dir),
-                options=definition.remote_path_options,
+                options=definition.remote_path_options.model_dump(),
             )
         except (FileNotFoundError, ReservedFileError) as e:
             raise TFWorkerException(e) from e
