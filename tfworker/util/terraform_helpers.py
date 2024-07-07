@@ -146,6 +146,11 @@ def _parse_required_providers(content: dict) -> Union[None, Dict[str, Dict[str, 
         if "required_providers" in block:
             for required_provider in block["required_providers"]:
                 for k, v in required_provider.items():
+                    """
+                    @TODO: Need to handle the version constraints
+                    to add all different constraints from submodules
+                    into the lockfile...
+                    """
                     providers[k] = v
 
     if len(providers.keys()) == 0:

@@ -72,7 +72,7 @@ class Definition(BaseModel):
         """
         Get the target path of the definition
         """
-        return Path(f"{working_dir}/definitions/{self.path}").resolve()
+        return Path(f"{working_dir}/definitions/{self.name}").resolve()
 
     def get_template_vars(self, global_vars: Dict[str, str]) -> Dict[str, str]:
         """
