@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Tuple
 from tfworker.types.terraform import TerraformAction
 
 if TYPE_CHECKING:
-    from click import Context
+    from click import Context  # pragma: no cover  # noqa: F401
 
-    from tfworker.app_state import AppState
-    from tfworker.definitions.model import Definition
+    from tfworker.app_state import AppState  # pragma: no cover  # noqa: F401
+    from tfworker.definitions.model import Definition  # pragma: no cover  # noqa: F401
 
 
 class DefinitionPlan:

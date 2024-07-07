@@ -46,6 +46,7 @@ def mock_cli_options_root():
     mock_root.region = "us-east-1"
     mock_root.backend_region = "us-east-1"
     mock_root.backend_bucket = "test-bucket"
+    mock_root.backend_plans = False
     mock_root.backend_prefix = "prefix"
     mock_root.create_backend_bucket = True
     return mock_root
@@ -58,6 +59,7 @@ def mock_cli_options_root_backend_west():
     mock_root.region = "us-east-1"
     mock_root.backend_region = "us-west-2"
     mock_root.backend_bucket = "west-test-bucket"
+    mock_root.backend_plans = False
     mock_root.backend_prefix = "prefix"
     mock_root.create_backend_bucket = True
     return mock_root
@@ -67,6 +69,9 @@ def mock_cli_options_root_backend_west():
 def mock_cli_options_terraform():
     """A mock CLIOptionsTerraform object with default values"""
     mock_terraform = MagicMock(spec=CLIOptionsTerraform)
+    mock_terraform.apply = True
+    mock_terraform.destroy = False
+    mock_terraform.plan_file_path = None
     return mock_terraform
 
 
@@ -119,6 +124,7 @@ def mock_app_state(
     mock_cli_options_terraform,
     mock_loaded_config,
     mock_authenticators,
+    tmpdir,
 ):
     """A mock AppState object with default values"""
     mock_state = MagicMock(spec=AppState)
@@ -132,6 +138,8 @@ def mock_app_state(
     mock_state.loaded_config.definitions = {}
     mock_state.loaded_config.handlers = {}
     mock_state.loaded_config.worker_options = {}
+    mock_state.working_dir = str(tmpdir)
+
     return mock_state
 
 
@@ -142,6 +150,7 @@ def mock_app_state_backend_west(
     mock_cli_options_clean,
     mock_loaded_config,
     mock_authenticators,
+    tmpdir,
 ):
     """A mock AppState object with default values and backend in us-west-2"""
     mock_state = MagicMock(spec=AppState)
@@ -154,6 +163,7 @@ def mock_app_state_backend_west(
     mock_state.loaded_config.providers = {}
     mock_state.loaded_config.definitions = {}
     mock_state.loaded_config.handlers = {}
+    mock_state.working_dir = str(tmpdir)
     return mock_state
 
 
