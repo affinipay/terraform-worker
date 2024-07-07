@@ -14,13 +14,14 @@ from tfworker.constants import (
 )
 from tfworker.copier import Copier, CopyFactory
 from tfworker.exceptions import ReservedFileError, TFWorkerException
+from tfworker.util.system import pipe_exec
 from tfworker.util.terraform import generate_terraform_lockfile
 
 if TYPE_CHECKING:
     from click import Context
 
     from tfworker.app_state import AppState
-    from tfworker.types.definition import Definition
+    from tfworker.definitions import Definition
 
 
 TERRAFORM_TPL = """\
@@ -91,7 +92,7 @@ class DefinitionPrepare:
         ) as tflocals:
             tflocals.write("locals {\n")
             for k, v in definition.get_remote_vars(
-                global_vars=self._app_state.loaded_config.global_vars.get("remote_vars", {})
+                global_vars=self._app_state.loaded_config.global_vars.remote_vars
             ).items():
                 tflocals.write(f"  {k} = data.terraform_remote_state.{v}\n")
             tflocals.write("}\n\n")
@@ -112,7 +113,7 @@ class DefinitionPrepare:
             "w+",
         ) as varfile:
             for k, v in definition.get_terraform_vars(
-                global_vars=self._app_state.loaded_config.global_vars.get("terraform_vars", {})
+                global_vars=self._app_state.loaded_config.global_vars.terraform_vars
             ).items():
                 varfile.write(f"{k} = {vars_typer(v)}\n")
 
@@ -143,6 +144,27 @@ class DefinitionPrepare:
                 "w",
             ) as lockfile:
                 lockfile.write(result)
+
+    def download_modules(self, name: str, stream_output: bool = True) -> None:
+        """Download the modules"""
+        from tfworker.commands.terraform import TerraformResult
+
+        definition = self._app_state.definitions[name]
+        log.trace(f"downloading modules for definition {name}")
+        result: TerraformResult = TerraformResult(
+            *pipe_exec(
+                "terraform get",
+                cwd=definition.get_target_path(self._app_state.working_dir),
+                stream_output=stream_output,
+            )
+        )
+        if not stream_output:
+            log.debug(f"terraform get result: {result.stdout}")
+            log.debug(f"terraform get error: {result.stderr}")
+        if result.exit_code != 0:
+            raise TFWorkerException(
+                f"could not download modules for definition {name}: {result.stderr}"
+            )
 
     def _get_provider_content(self, name: str) -> str:
         """Get the provider content"""
@@ -207,7 +229,7 @@ class DefinitionPrepare:
         """
         definition: "Definition" = self._app_state.definitions[name]
         template_vars = definition.get_template_vars(
-            self._app_state.loaded_config.global_vars.get("template_vars", {})
+            self._app_state.loaded_config.global_vars.template_vars
         ).copy()
 
         for item in self._app_state.root_options.config_var:

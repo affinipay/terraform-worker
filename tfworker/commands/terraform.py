@@ -74,6 +74,9 @@ class TerraformCommand(BaseCommand):
                 def_prep.create_local_vars(name=name)
                 def_prep.create_terraform_vars(name=name)
                 def_prep.create_worker_tf(name=name)
+                def_prep.download_modules(
+                    name=name, stream_output=self.terraform_config.stream_output
+                )
                 def_prep.create_terraform_lockfile(name=name)
             except TFWorkerException as e:
                 log.error(f"error rendering templates for definition {name}: {e}")
@@ -338,7 +341,7 @@ class TerraformCommand(BaseCommand):
                 b64_encode=self.terraform_config.b64_encode,
                 debug=self.terraform_config.debug,
                 extra_vars=definition.get_template_vars(
-                    self.app_state.loaded_config.global_vars.get("template_vars", {})
+                    self.app_state.loaded_config.global_vars.template_vars
                 ),
             )
         except HookError as e:

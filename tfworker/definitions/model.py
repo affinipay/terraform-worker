@@ -29,7 +29,11 @@ class Definition(BaseModel):
     path: str
     always_apply: bool = False
     always_include: bool = False
-    remote_path_options: Optional[DefinitionRemoteOptions] = None
+    remote_path_options: Optional[DefinitionRemoteOptions] = Field(
+        default_factory=DefinitionRemoteOptions,
+        description="Options for the remote path of the definition",
+    )
+    ignore_global_vars: bool = False
     ignored_global_terraform_vars: Optional[List[str]] = Field(
         [], description="List of global vars to ignore."
     )
@@ -82,7 +86,9 @@ class Definition(BaseModel):
         """
         full_vars = self.template_vars.copy()
         log.trace(f"initial template vars: {full_vars}")
-
+        if self.ignore_global_vars:
+            log.trace("ignoring global vars, not adding to definition template vars")
+            return full_vars
         for key, value in global_vars.items():
             if key in full_vars:
                 log.trace(
@@ -121,7 +127,9 @@ class Definition(BaseModel):
         """
         full_vars = self.remote_vars.copy()
         log.trace(f"initial remote vars: {full_vars}")
-
+        if self.ignore_global_vars:
+            log.trace("ignoring global vars, not adding to definition template vars")
+            return full_vars
         for key, value in global_vars.items():
             if key in full_vars:
                 log.trace(
@@ -157,7 +165,9 @@ class Definition(BaseModel):
         """
         full_vars = self.terraform_vars.copy()
         log.trace(f"initial terraform vars: {full_vars}")
-
+        if self.ignore_global_vars:
+            log.trace("ignoring global vars, not adding to definition template vars")
+            return full_vars
         for key, value in global_vars.items():
             if key in full_vars:
                 log.trace(

@@ -202,7 +202,14 @@ def _process_template(config_file: str, config_vars: Dict[str, str]) -> str:
     except jinja2.exceptions.UndefinedError as e:
         log.safe_error(f"Jinja2 Enironment\n{json.dumps(config_vars, indent=2)}")
         log.error(f"configuration file contains invalid template substitutions: {e}")
-        raise SystemExit(1)
+        click.get_current_context().exit(1)
+    except jinja2.exceptions.TemplateNotFound as e:
+        log.error(f"configuration file {config_file} not found: {e}")
+        click.get_current_context().exit(1)
+    except jinja2.exceptions.TemplateSyntaxError as e:
+        log.error("configuration file contains invalid template syntax")
+        log.error(f"File: {e.filename}; Line: {e.lineno}; Message: {e.message}")
+        click.get_current_context().exit(1)
 
     return template_reader.getvalue()
 

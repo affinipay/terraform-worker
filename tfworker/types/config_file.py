@@ -35,7 +35,8 @@ class ConfigFile(FreezableBaseModel):
         {}, description="The definition configurations."
     )
     global_vars: Optional[GlobalVars] = Field(
-        {}, description="Global variables that are used in the configuration file."
+        default_factory=GlobalVars,
+        description="Global variables that are used in the configuration file.",
     )
     providers: Dict[str, Any] = Field({}, description="The provider configurations.")
     worker_options: Dict[str, str | bool] = Field(
