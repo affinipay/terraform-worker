@@ -20,16 +20,16 @@ class GitCopier(Copier):
         reset_repo = False
 
         sub_path = ""
-        if "sub_path" in kwargs:
+        if "sub_path" in kwargs and kwargs["sub_path"]:
             sub_path = kwargs["sub_path"].strip("/")
 
-        if "branch" in kwargs:
+        if "branch" in kwargs and kwargs["branch"]:
             branch = kwargs["branch"]
-        if "git_cmd" in kwargs:
+        if "git_cmd" in kwargs and kwargs["git_cmd"]:
             git_cmd = kwargs["git_cmd"]
-        if "git_args" in kwargs:
+        if "git_args" in kwargs and kwargs["git_args"]:
             git_args = kwargs["git_args"]
-        if "reset_repo" in kwargs:
+        if "reset_repo" in kwargs and kwargs["reset_repo"]:
             reset_repo = kwargs["reset_repo"]
 
         self.make_temp()
