@@ -131,6 +131,7 @@ def mock_app_state(
     mock_state.loaded_config.providers = {}
     mock_state.loaded_config.definitions = {}
     mock_state.loaded_config.handlers = {}
+    mock_state.loaded_config.worker_options = {}
     return mock_state
 
 

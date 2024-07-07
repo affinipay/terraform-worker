@@ -43,6 +43,12 @@ class TestFileSystemCopier:
         assert c.local_path == tmpdir.name
         del tmpdir
 
+        # This tests the resolution of an absolute path with a root path
+        tmpdir = tempfile.TemporaryDirectory()
+        c = FileSystemCopier(source=tmpdir.name, root_path=os.getcwd())
+        assert c.local_path == tmpdir.name
+        del tmpdir
+
         # Ensure file not found error is raised on invalid relative path
         with pytest.raises(FileNotFoundError):
             FileSystemCopier(

@@ -156,7 +156,8 @@ class CLIOptionsRoot(FreezableBaseModel):
                     f"Backend {backend} is not supported, must be one of {' | '.join(Backends.names())}"
                 )
             return selected_backend
-        return backend
+        if isinstance(backend, Backends):
+            return backend
 
     @field_validator("config_file")
     @classmethod
@@ -174,6 +175,8 @@ class CLIOptionsRoot(FreezableBaseModel):
         """
         if not os.path.isabs(fpath):
             fpath = os.path.abspath(fpath)
+        if os.path.isdir(fpath):
+            raise ValueError(f"Config file {fpath} is a directory!")
         if not os.path.isfile(fpath):
             raise ValueError(f"Config file {fpath} does not exist!")
         if not os.access(fpath, os.R_OK):
@@ -446,6 +449,8 @@ def validate_existing_dir(fpath: Union[str, None], empty=False) -> Union[str, No
         raise ValueError(f"path {fpath} does not exist!")
     if not os.access(fpath, os.W_OK):
         raise ValueError(f"Ppath {fpath} is not writeable!")
+    if not os.access(fpath, os.R_OK):
+        raise ValueError(f"path {fpath} is not readable!")
     if empty and any(os.listdir(fpath)):
         raise ValueError(f"path {fpath} must be empty!")
     return fpath
@@ -457,6 +462,9 @@ def validate_limit(values):
     """
     if values.get("limit") is None:
         return values
+
+    if isinstance(values["limit"], str):
+        values["limit"] = values["limit"].split(",")
 
     new_items = []
     # accept comma separated values and convert to list, same as passing --limit item_one --limit item_two
