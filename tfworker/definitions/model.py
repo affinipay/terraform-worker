@@ -14,9 +14,8 @@ class DefinitionRemoteOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: str
-    config: Dict[str, str]
-    vars: Dict[str, str]
+    branch: Optional[str] = None
+    sub_path: Optional[str] = None
 
 
 class Definition(BaseModel):
