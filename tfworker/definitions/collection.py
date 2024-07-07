@@ -6,6 +6,7 @@ from pydantic import GetCoreSchemaHandler, ValidationError
 from pydantic_core import CoreSchema, core_schema
 
 import tfworker.util.log as log
+from tfworker.exceptions import FrozenInstanceError
 from tfworker.util.cli import handle_config_error
 
 from .model import Definition
@@ -20,6 +21,7 @@ class DefinitionsCollection(Mapping):
 
     _instance = None
     _lock = threading.Lock()
+    _frozen: bool = False
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -69,6 +71,14 @@ class DefinitionsCollection(Mapping):
 
     def __iter__(self):
         return iter(self._definitions)
+
+    def __setitem__(self, key: str, value: "Definition"):
+        if self._frozen:
+            raise FrozenInstanceError("Cannot modify a frozen instance.")
+        self._definitions[key] = value
+
+    def freeze(self):
+        self._frozen = True
 
     @classmethod
     def __get_pydantic_core_schema__(

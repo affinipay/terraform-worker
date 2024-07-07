@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Dict, Union
 
 import tfworker.util.log as log
-from tfworker.exceptions import HandlerError, UnknownHandler
+from tfworker.exceptions import FrozenInstanceError, HandlerError, UnknownHandler
 
 if TYPE_CHECKING:
     from tfworker.commands.terraform import TerraformResult
@@ -20,6 +20,7 @@ class HandlersCollection(Mapping):
 
     _instance = None
     _lock = threading.Lock()
+    _frozen: bool = False
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -52,7 +53,15 @@ class HandlersCollection(Mapping):
         return iter(self._handlers.keys())
 
     def __setitem__(self, key, value):
+        if self._frozen:
+            raise FrozenInstanceError("Cannot modify a frozen instance.")
         self._handlers[key] = value
+
+    def freeze(self):
+        """
+        freeze is used to prevent further modification of the handlers collection.
+        """
+        self._frozen = True
 
     def update(self, handlers_config):
         """

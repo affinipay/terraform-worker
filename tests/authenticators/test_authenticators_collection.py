@@ -6,7 +6,7 @@ from pydantic_core import InitErrorDetails
 
 from tfworker.authenticators.base import BaseAuthenticator, BaseAuthenticatorConfig
 from tfworker.authenticators.collection import AuthenticatorsCollection
-from tfworker.exceptions import UnknownAuthenticator
+from tfworker.exceptions import FrozenInstanceError, UnknownAuthenticator
 
 
 class MockAuthenticatorConfig(BaseAuthenticatorConfig):
@@ -103,3 +103,16 @@ class TestAuthenticatorsCollection:
             assert (
                 authenticator.tag == "mock"
             ), "__iter__ should return the authenticators in the collection"
+
+    def test_set_item(self, authenticators_collection):
+        authenticators_collection["new"] = MockAuthenticator(MockAuthenticatorConfig())
+        assert (
+            authenticators_collection["new"] is not None
+        ), "__setitem__ should add a new authenticator"
+
+    def test_set_item_frozen(self, authenticators_collection):
+        authenticators_collection.freeze()
+        with pytest.raises(FrozenInstanceError):
+            authenticators_collection["new"] = MockAuthenticator(
+                MockAuthenticatorConfig()
+            )

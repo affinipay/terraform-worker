@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 import tfworker.util.log as log
-from tfworker.exceptions import UnknownAuthenticator
+from tfworker.exceptions import FrozenInstanceError, UnknownAuthenticator
 
 from .aws import AWSAuthenticator  # noqa
 from .base import BaseAuthenticator  # noqa
@@ -29,6 +29,7 @@ class AuthenticatorsCollection(collections.abc.Mapping):
 
     _instance = None
     _lock = threading.Lock()
+    _frozen = False
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -63,6 +64,14 @@ class AuthenticatorsCollection(collections.abc.Mapping):
 
     def __iter__(self) -> iter:
         return iter(self._authenticators.values())
+
+    def __setitem__(self, key, value):
+        if self._frozen:
+            raise FrozenInstanceError("Cannot modify a frozen instance.")
+        self._authenticators[key] = value
+
+    def freeze(self):
+        self._frozen = True
 
     def get(self, value) -> BaseAuthenticator:
         return self[value]

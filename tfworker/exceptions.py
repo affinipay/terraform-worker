@@ -96,6 +96,15 @@ class HandlerError(TFWorkerException):
         return f"Handler error: {self.message}"
 
 
+class FrozenInstanceError(TFWorkerException):
+    """
+    This is an exception that indicates an attempt to modify a frozen instance.
+    """
+
+    def __str__(self) -> str:
+        return "Cannot modify a frozen instance."
+
+
 class UnknownAuthenticator(Exception):
     def __init__(self, provider):
         super().__init__(f"{provider} is not a known authenticator.")

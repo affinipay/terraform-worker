@@ -176,6 +176,34 @@ class TestAWSAuthenticator:
         assert authenticator.backend_session is not None
         assert authenticator.session != authenticator.backend_session
 
+    @mock_aws
+    def test_backend_region_property(self):
+        alt_creds = MOCK_AWS_CREDS.copy()
+        alt_creds.update({"backend_region": "us-west-2"})
+        config = AWSAuthenticatorConfig(**alt_creds)
+        authenticator = AWSAuthenticator(config)
+        assert authenticator.backend_region == "us-west-2"
+
+    @mock_aws
+    def test_backend_region_property_default(self):
+        config = AWSAuthenticatorConfig(**MOCK_AWS_CREDS)
+        authenticator = AWSAuthenticator(config)
+        assert authenticator.backend_region == "us-east-1"
+
+    @mock_aws
+    def test_region_property(self):
+        alt_creds = MOCK_AWS_CREDS.copy()
+        alt_creds.update({"aws_region": "us-west-2"})
+        config = AWSAuthenticatorConfig(**alt_creds)
+        authenticator = AWSAuthenticator(config)
+        assert authenticator.region == "us-west-2"
+
+    @mock_aws
+    def test_region_property_default(self):
+        config = AWSAuthenticatorConfig(**MOCK_AWS_CREDS)
+        authenticator = AWSAuthenticator(config)
+        assert authenticator.region == "us-east-1"
+
 
 @mock_aws
 class TestAssumeRoleSession:

@@ -72,8 +72,19 @@ class AppState(FreezableBaseModel):
     )
 
     def freeze(self):
+        """
+        Freeze the AppState and all nested models.
+
+        This is used to prevent modification of the AppState after it has been initialized.
+
+        the `backend` attribute is not frozen, it has no modification methods.
+        """
         super().freeze()
+        self.authenticators.freeze() if self.authenticators else None
         self.clean_options.freeze() if self.clean_options else None
-        self.terraform_options.freeze() if self.terraform_options else None
-        self.root_options.freeze() if self.root_options else None
+        self.definitions.freeze() if self.definitions else None
+        self.handlers.freeze() if self.handlers else None
         self.loaded_config.freeze() if self.loaded_config else None
+        self.providers.freeze() if self.providers else None
+        self.root_options.freeze() if self.root_options else None
+        self.terraform_options.freeze() if self.terraform_options else None

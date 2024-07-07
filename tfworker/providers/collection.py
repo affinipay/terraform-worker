@@ -7,6 +7,7 @@ from pydantic import GetCoreSchemaHandler, ValidationError
 from pydantic_core import CoreSchema, core_schema
 
 import tfworker.util.log as log
+from tfworker.exceptions import FrozenInstanceError
 
 if TYPE_CHECKING:
     from tfworker.providers.model import Provider
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 class ProvidersCollection(Mapping):
     _instance = None
     _lock = threading.Lock()
+    _frozen: bool = False
 
     @classmethod
     def get_named_providers(cls):
@@ -74,6 +76,14 @@ class ProvidersCollection(Mapping):
 
     def __str__(self):
         return str([f"{x.name}: {str(x.gid)}" for x in self._providers.values()])
+
+    def __setitem__(self, key, value):
+        if self._frozen:
+            raise FrozenInstanceError("Cannot modify a frozen instance.")
+        self._providers[key] = value
+
+    def freeze(self):
+        self._frozen = True
 
     @classmethod
     def delete_instance(cls):
