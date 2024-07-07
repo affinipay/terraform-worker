@@ -204,14 +204,11 @@ class S3Backend(BaseBackend):
         start_after = (
             (start_after or prefix) if prefix.endswith(delimiter) else start_after
         )
-        try:
-            for page in paginator.paginate(
-                Bucket=bucket_name, Prefix=prefix, StartAfter=start_after
-            ):
-                for content in page.get("Contents", ()):
-                    yield content["Key"]
-        except TypeError:
-            pass
+        for page in paginator.paginate(
+            Bucket=bucket_name, Prefix=prefix, StartAfter=start_after
+        ):
+            for content in page.get("Contents", ()):
+                yield content["Key"]
 
     def _check_bucket_exists(self, name: str) -> bool:
         """
@@ -342,13 +339,14 @@ class S3Backend(BaseBackend):
                 if "PYTEST_CURRENT_TEST" not in os.environ:
                     log.error(
                         f"Bucket {name} already exists, this is not expected since a moment ago it did not"
-                    )
+                    )  # pragma: no cover
                 click.get_current_context().exit(1)
             elif "BucketAlreadyOwnedByYou" in err_str:
                 log.error(f"Bucket {name} already owned by you: {err}")
                 self._ctx.exit(1)
             else:
-                raise err
+                log.error(f"Unknown error creating bucket: {err}")
+                self._ctx.exit(1)
 
     def _create_bucket_versioning(self, name: str) -> None:
         """

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from tfworker.authenticators.collection import (  # pragma: no cover # noqa
         AuthenticatorsCollection,
     )
-    from tfworker.backends.base import BaseBackend  # pragma: no cover
+    from tfworker.backends import Backends, BaseBackend  # pragma: no cover
     from tfworker.definitions.collection import (  # pragma: no cover # noqa
         DefinitionsCollection,
     )
@@ -196,7 +196,9 @@ def _init_backend_(app_state: "AppState") -> "BaseBackend":
     return be
 
 
-def _select_backend(backend_config, deployment, authenticators) -> "BaseBackend":
+def _select_backend(
+    backend: "Backends", deployment: str, authenticators: "AuthenticatorsCollection"
+) -> "BaseBackend":
     """
     Selects and initializes the backend.
 
@@ -212,14 +214,8 @@ def _select_backend(backend_config, deployment, authenticators) -> "BaseBackend"
     Raises:
         BackendError: If there is an error selecting the backend.
     """
-    from tfworker.backends import select_backend
-
     try:
-        return select_backend(
-            backend_config,
-            deployment,
-            authenticators,
-        )
+        return backend.value(authenticators, deployment=deployment)
     except BackendError as e:
         log.error(e)
         log.error(e.help)

@@ -150,9 +150,11 @@ class CLIOptionsRoot(FreezableBaseModel):
         # convert the backend str to the corresponding enum
         if isinstance(backend, str):
             try:
-                selected_backend = Backends(backend.lower())
-            except ValueError:
-                raise ValueError(f"Backend {backend} is not supported!")
+                selected_backend = Backends[backend.upper()]
+            except (ValueError, KeyError):
+                raise ValueError(
+                    f"Backend {backend} is not supported, must be one of {' | '.join(Backends.names())}"
+                )
             return selected_backend
         return backend
 

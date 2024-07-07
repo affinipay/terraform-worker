@@ -549,3 +549,16 @@ class TestS3BackendCreateBucket:
         )
         with pytest.raises(SystemExit):
             backend._create_bucket("already-exists-test-bucket")
+
+    @mock_aws
+    def test_create_bucket_unknown_error(self, mock_authenticators):
+        backend = S3Backend(mock_authenticators, "test-deployment")
+        with patch.object(
+            backend._s3_client,
+            "create_bucket",
+            side_effect=botocore.exceptions.ClientError(
+                {"Error": {"Code": "UnknownError"}}, "CreateBucket"
+            ),
+        ):
+            with pytest.raises(SystemExit):
+                backend._create_bucket("test-bucket")

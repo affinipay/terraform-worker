@@ -40,7 +40,7 @@ class BaseBackend(metaclass=ABCMeta):
         Raises:
             BackendError: If there is an error during initialization
         """
-        ...
+        pass  # pragma: no cover
 
     @abstractmethod
     def hcl(self, deployment: str) -> str:
@@ -53,7 +53,7 @@ class BaseBackend(metaclass=ABCMeta):
         Returns:
             str: The HCL configuration
         """
-        pass
+        pass  # pragma: no cover
 
     @abstractmethod
     def data_hcl(self, remotes: list) -> str:
@@ -67,7 +67,7 @@ class BaseBackend(metaclass=ABCMeta):
         Returns:
             str: The HCL configuration for the remote data source
         """
-        pass
+        pass  # pragma: no cover
 
     @abstractmethod
     def clean(self, deployment: str, limit: tuple) -> None:
@@ -78,7 +78,7 @@ class BaseBackend(metaclass=ABCMeta):
             deployment (str): The deployment name
             limit (tuple): A tuple with a list of resources to limit execution to
         """
-        pass
+        pass  # pragma: no cover
 
     @property
     @abstractmethod
@@ -89,7 +89,7 @@ class BaseBackend(metaclass=ABCMeta):
         Returns:
             list: A list of remote data sources
         """
-        pass
+        pass  # pragma: no cover
 
 
 def validate_backend_empty(state: JSONType) -> bool:
@@ -104,4 +104,6 @@ def validate_backend_empty(state: JSONType) -> bool:
         else:
             return True
     except KeyError:
-        raise BackendError("resources key does not exist in state!")
+        raise BackendError("resources key does not exist in state")
+    except TypeError:
+        raise BackendError("state is not valid JSON")
