@@ -221,5 +221,5 @@ def _update_parsed_providers(providers: dict, parsed_providers: dict):
                     f"provider {k} has conflicting sources: {v['source']} and {providers[k]['source']}"
                 )
         if v.get("version") is not None:
-            providers[k]["version"] + SpecifierSet(v["version"])
+            providers[k]["version"] & SpecifierSet(v["version"])
     return providers
