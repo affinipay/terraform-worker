@@ -39,6 +39,7 @@ python-hcl2 = "^4.3"
 pyyaml = "^6.0"
 setuptools = "^70.0"
 pydantic-settings = "^2.3.4"
+packaging = "^24.1"
 
 [tool.poetry.scripts]
 worker = 'tfworker.cli:cli'
