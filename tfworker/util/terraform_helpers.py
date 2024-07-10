@@ -196,9 +196,7 @@ def _parse_required_providers(content: dict) -> Dict[str, "ProviderRequirements"
     return providers
 
 
-def _update_parsed_providers(
-    providers: dict, parsed_providers: dict
-) -> Dict[str, "ProviderRequirements"]:
+def _update_parsed_providers(providers: dict, parsed_providers: dict):
     """
     Update the providers with the parsed providers.
 
@@ -209,7 +207,10 @@ def _update_parsed_providers(
     Raises:
         TFWorkerException: If there are conflicting sources for the same provider.
     """
+    log.error(f"old: {providers}")
+    log.error(f"new: {parsed_providers}")
     for k, v in parsed_providers.items():
+        log.error(f"key: {k}, value: {v}")
         if k not in providers:
             providers[k] = v
             continue
