@@ -212,7 +212,8 @@ def _update_parsed_providers(providers: dict, parsed_providers: dict):
     for k, v in parsed_providers.items():
         log.error(f"key: {k}, value: {v}")
         if k not in providers:
-            providers[k] = v
+            new_provider = {"source": v.get("source", ""), "version": SpecifierSet()}
+            providers[k] = new_provider
             continue
         if v.get("source") is not None and providers[k].get("source") is not None:
             if v["source"] != providers[k]["source"]:
