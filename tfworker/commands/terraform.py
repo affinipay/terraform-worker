@@ -442,6 +442,10 @@ class TerraformCommandConfig:
             return TerraformAction.DESTROY
         return TerraformAction.APPLY
 
+    @property
+    def strict_locking(self):
+        return self._app_state.terraform_options.strict_locking
+
     @staticmethod
     def get_log_method(command: str) -> callable:
         return {
@@ -458,12 +462,10 @@ class TerraformCommandConfig:
         )
 
         plan_action = " -destroy" if self.action == TerraformAction.DESTROY else ""
+        read_only = "-lockfile=readonly" if self.strict_locking else ""
 
-        """ it would be desirable to add -lockfile=readonly but requires modules have strict
-            adherance to defining all module versions
-            "init": f"-input=false {color_str} -plugin-dir={plugin_dir} -lockfile=readonly"""
         return {
-            TerraformAction.INIT: f"-input=false {color_str} -plugin-dir={self._app_state.terraform_options.provider_cache}",
+            TerraformAction.INIT: f"-input=false {color_str} {read_only} -plugin-dir={self._app_state.terraform_options.provider_cache}",
             TerraformAction.PLAN: f"-input=false {color_str} {plan_action} -detailed-exitcode -out {plan_file}",
             TerraformAction.APPLY: f"-input=false {color_str} -auto-approve {plan_file}",
             TerraformAction.DESTROY: f"-input=false {color_str} -auto-approve",

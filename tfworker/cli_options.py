@@ -331,6 +331,11 @@ class CLIOptionsTerraform(FreezableBaseModel):
         json_schema_extra={"env": "WORKER_PROVIDER_CACHE"},
         description="Directory to be used as a cache for provider plugins",
     )
+    strict_locking: bool = Field(
+        True,
+        json_schema_extra={"env": "WORKER_STRICT_LOCKING"},
+        description="Enable strict locking for terraform providers (fail if pinned providers do not meet constraints)",
+    )
     stream_output: bool = Field(
         True,
         json_schema_extra={"env": "WORKER_STREAM_OUTPUT"},

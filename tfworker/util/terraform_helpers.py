@@ -207,10 +207,7 @@ def _update_parsed_providers(providers: dict, parsed_providers: dict):
     Raises:
         TFWorkerException: If there are conflicting sources for the same provider.
     """
-    log.error(f"old: {providers}")
-    log.error(f"new: {parsed_providers}")
     for k, v in parsed_providers.items():
-        log.error(f"key: {k}, value: {v}")
         if k not in providers:
             new_provider = {"source": v.get("source", ""), "version": SpecifierSet(v.get("version", ""))}
             providers[k] = new_provider
