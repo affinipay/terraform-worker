@@ -208,7 +208,7 @@ class Definition(BaseModel):
         return cached_get_used_providers(self.get_target_path(working_dir))
 
 
-@lru_cache
+# @lru_cache
 def cached_get_used_providers(working_dir: str) -> Union[List[str], None]:
     """
     Get the providers used by the definition
