@@ -118,6 +118,12 @@ class TerraformCommand(BaseCommand):
 
             log.info(f"definition {name} needs a plan: {reason}")
             self._exec_terraform_plan(name=name)
+            if getattr(self.app_state.definitions[name], "always_apply", False):
+                log.info(
+                    f"definition {name} has always_apply set; applying immediately after plan"
+                )
+                self._exec_terraform_action(name=name, action=TerraformAction.APPLY)
+                self.app_state.definitions[name].needs_apply = False
 
     def terraform_apply_or_destroy(self) -> None:
         log.trace("entering terraform apply or destroy")
@@ -137,12 +143,10 @@ class TerraformCommand(BaseCommand):
                         log.info(f"skipping destroy for definition: {name}")
                         continue
             log.trace(
-                f"running {action} for definition: {name} if needs_apply or always_apply is True, "
-                f"needs_apply value: {self.app_state.definitions[name].needs_apply}, always_apply value: {getattr(self.app_state.definitions[name], 'always_apply', False)}"
+                f"running {action} for definition: {name} if needs_apply is True, "
+                f"needs_apply value: {self.app_state.definitions[name].needs_apply}"
             )
-            if self.app_state.definitions[name].needs_apply or getattr(
-                self.app_state.definitions[name], "always_apply", False
-            ):
+            if self.app_state.definitions[name].needs_apply:
                 log.info(f"running apply for definition: {name}")
                 self._exec_terraform_action(name=name, action=action)
 
