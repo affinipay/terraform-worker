@@ -10,8 +10,8 @@ from tfworker.commands.base import BaseCommand
 from tfworker.definitions import Definition
 from tfworker.exceptions import HandlerError, HookError, TFWorkerException
 from tfworker.types.terraform import TerraformAction, TerraformStage
-from tfworker.util.terraform import quote_index_brackets
 from tfworker.util.system import pipe_exec
+from tfworker.util.terraform import quote_index_brackets
 
 if TYPE_CHECKING:
     from tfworker.app_state import AppState
@@ -137,9 +137,12 @@ class TerraformCommand(BaseCommand):
                         log.info(f"skipping destroy for definition: {name}")
                         continue
             log.trace(
-                f"running {action} for definition: {name} if needs_apply is True, value is: {self.app_state.definitions[name].needs_apply}"
+                f"running {action} for definition: {name} if needs_apply or always_apply is True, "
+                f"needs_apply value: {self.app_state.definitions[name].needs_apply}, always_apply value: {getattr(self.app_state.definitions[name], 'always_apply', False)}"
             )
-            if self.app_state.definitions[name].needs_apply:
+            if self.app_state.definitions[name].needs_apply or getattr(
+                self.app_state.definitions[name], "always_apply", False
+            ):
                 log.info(f"running apply for definition: {name}")
                 self._exec_terraform_action(name=name, action=action)
 
@@ -254,8 +257,21 @@ class TerraformCommand(BaseCommand):
         if result.exit_code == 0:
             log.debug(f"no changes for definition {name}")
             definition.needs_apply = False
-            # remove the empty plan file
-            definition.plan_file.unlink()
+            # If always_apply is set, set needs_apply anyway
+            if getattr(definition, "always_apply", False):
+                log.debug(f"definition {name} has always_apply set; applying anyway")
+                definition.needs_apply = True
+            # handle plan file logging and removal based on always_apply
+            if definition.plan_file.exists():
+                size = definition.plan_file.stat().st_size
+                log.trace(f"plan file {definition.plan_file} has size {size} bytes")
+                if not getattr(definition, "always_apply", False):
+                    definition.plan_file.unlink()
+                    log.trace(f"removed empty plan file for definition {name}")
+                else:
+                    log.trace(
+                        f"retained plan file for definition {name} due to always_apply=True"
+                    )
 
         if result.exit_code == 1:
             log.error(f"error running terraform plan for {name}")

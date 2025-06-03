@@ -190,6 +190,7 @@ def find_required_providers(
         return None
     return required_providers
 
+
 @lru_cache
 def quote_index_brackets(resource: str) -> str:
     return re.sub(r'\[([^\[\]"]+)\]', r'["\1"]', resource)
