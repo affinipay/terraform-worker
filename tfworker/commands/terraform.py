@@ -221,6 +221,9 @@ class TerraformCommand(BaseCommand):
             result,
         )
 
+        if action == TerraformAction.APPLY:
+            definition.plan_file.unlink(missing_ok=True)
+
     def _exec_terraform_pre_plan(self, name: str) -> None:
         """
         Execute terraform pre plan with hooks and handlers for the given definition
