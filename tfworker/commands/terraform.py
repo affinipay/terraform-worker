@@ -148,6 +148,9 @@ class TerraformCommand(BaseCommand):
                 f"needs_apply value: {self.app_state.definitions[name].needs_apply}"
             )
             if self.app_state.definitions[name].needs_apply:
+                if not self._app_state.definitions[name].plan_file.exists():
+                    log.info(f"plan file does not exist for definition: {name}; skipping apply")
+                    continue
                 log.info(f"running apply for definition: {name}")
                 self._exec_terraform_action(name=name, action=action)
 
@@ -217,6 +220,9 @@ class TerraformCommand(BaseCommand):
             TerraformStage.POST,
             result,
         )
+
+        if action == TerraformAction.APPLY:
+            definition.plan_file.unlink(missing_ok=True)
 
     def _exec_terraform_pre_plan(self, name: str) -> None:
         """
