@@ -70,6 +70,15 @@ class TerraformCommand(BaseCommand):
 
         def_prep = DefinitionPrepare(self.app_state)
         definition_names = list(self.app_state.definitions.keys())
+        
+        # Use sequential processing for small numbers of definitions
+        if len(definition_names) < 4:
+            log.info(f"Initializing {len(definition_names)} definitions sequentially")
+            for name in definition_names:
+                log.info(f"initializing definition: {name}")
+                self._prepare_definition(def_prep, name)
+                self._terraform_init_single(name)
+            return
 
         log.info(f"Initializing {len(definition_names)} definitions in parallel")
 
