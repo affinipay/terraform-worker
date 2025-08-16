@@ -97,7 +97,10 @@ def make_command(tmp_path, **opts_overrides):
     state = SimpleNamespace(
         terraform_options=Opts(),
         root_options=RootOpts(),
-        loaded_config=SimpleNamespace(global_vars=SimpleNamespace(template_vars={})),
+        loaded_config=SimpleNamespace(
+            global_vars=SimpleNamespace(template_vars={}),
+            parallel_options=SimpleNamespace(max_preparation_workers=8, max_init_workers=4)
+        ),
         authenticators=[SimpleNamespace(env=lambda: {"AUTH_VAR": "1"})],
         providers="providers",
         backend="backend",
@@ -190,7 +193,10 @@ class TestTerraformCommandMethods:
 
     def test_exec_terraform_action_flow(self, tmp_path, mocker):
         cmd = make_command(tmp_path)
-        _ = cmd.app_state.definitions["def"]
+        definition = cmd.app_state.definitions["def"]
+        plan_file = tmp_path / "plan.tfplan"
+        plan_file.touch()
+        definition.plan_file = str(plan_file)
         run = mocker.patch.object(
             cmd, "_run", return_value=TerraformResult(0, b"", b"")
         )
@@ -274,12 +280,31 @@ class TestTerraformCommandMethods:
     def test_terraform_apply_or_destroy(self, tmp_path, mocker):
         cmd = make_command(tmp_path, apply=True)
         cmd.app_state.definitions["def"].needs_apply = True
+        plan_file = tmp_path / "plan.tfplan"
+        plan_file.touch()
+        cmd.app_state.definitions["def"].plan_file = str(plan_file)
         run = mocker.patch.object(cmd, "_exec_terraform_action")
         cmd.terraform_apply_or_destroy()
         run.assert_called_once()
 
         cmd = make_command(tmp_path, destroy=True, limit=["skip"])
         cmd.app_state.definitions["def"].needs_apply = True
+        run = mocker.patch.object(cmd, "_exec_terraform_action")
+        cmd.terraform_apply_or_destroy()
+        run.assert_not_called()
+
+    def test_terraform_apply_or_destroy_no_plan_file(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, apply=True)
+        cmd.app_state.definitions["def"].needs_apply = True
+        cmd.app_state.definitions["def"].plan_file = None
+        run = mocker.patch.object(cmd, "_exec_terraform_action")
+        cmd.terraform_apply_or_destroy()
+        run.assert_not_called()
+
+    def test_terraform_apply_or_destroy_missing_plan_file(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, apply=True)
+        cmd.app_state.definitions["def"].needs_apply = True
+        cmd.app_state.definitions["def"].plan_file = str(tmp_path / "missing.tfplan")
         run = mocker.patch.object(cmd, "_exec_terraform_action")
         cmd.terraform_apply_or_destroy()
         run.assert_not_called()
@@ -291,6 +316,41 @@ class TestTerraformCommandMethods:
         cmd.terraform_init()
         assert dp.called
         assert run.called
+
+    def test_terraform_init_sequential_small(self, tmp_path, mocker):
+        cmd = make_command(tmp_path)
+        prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        cmd.terraform_init()
+        assert prepare_mock.call_count == 1
+        assert init_mock.call_count == 1
+
+    def test_terraform_init_parallel_large(self, tmp_path, mocker):
+        cmd = make_command(tmp_path)
+        for i in range(2, 5):
+            cmd.app_state.definitions[f"def{i}"] = cmd.app_state.definitions["def"]
+        prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single_parallel")
+        cmd.terraform_init()
+        assert prepare_mock.call_count == 4
+        assert init_mock.call_count == 4
+
+    def test_terraform_init_single_parallel_captured_output(self, tmp_path, mocker):
+        cmd = make_command(tmp_path)
+        mock_pipe_exec = mocker.patch(
+            "tfworker.commands.terraform.pipe_exec",
+            return_value=(0, b"Terraform initialized successfully!", b""),
+        )
+        mock_log_info = mocker.patch("tfworker.commands.terraform.log.info")
+        mock_log_debug = mocker.patch("tfworker.commands.terraform.log.debug")
+
+        cmd._terraform_init_single_parallel("def")
+
+        mock_pipe_exec.assert_called_once()
+        args, kwargs = mock_pipe_exec.call_args
+        assert kwargs["stream_output"] is False
+        mock_log_info.assert_called_with("Terraform init completed for definition: def")
+        mock_log_debug.assert_called_with("[def] Terraform initialized successfully!")
 
 
 class TestTerraformResult:

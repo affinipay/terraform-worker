@@ -29,6 +29,22 @@ class TestLoadConfig:
         assert loaded.definitions["mod"]["path"] == "/new"
         assert "extra" in loaded.definitions
 
+    def test_parallel_options_defaults(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("""terraform:\n  definitions:\n    a:\n      path: /a\n""")
+        loaded = c.load_config(str(cfg), {"deployment": "d"})
+        assert loaded.parallel_options.max_preparation_workers == 8
+        assert loaded.parallel_options.max_init_workers == 4
+
+    def test_parallel_options_custom(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            """terraform:\n  parallel_options:\n    max_preparation_workers: 2\n    max_init_workers: 1\n  definitions:\n    a:\n      path: /a\n"""
+        )
+        loaded = c.load_config(str(cfg), {"deployment": "d"})
+        assert loaded.parallel_options.max_preparation_workers == 2
+        assert loaded.parallel_options.max_init_workers == 1
+
 
 class TestProcessTemplate:
     def test_template_vars(self, tmp_path):

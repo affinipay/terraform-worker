@@ -236,9 +236,35 @@ def test_get_remotes(def_prepare, mocker, definition):
     definition.remote_vars = {"a": "one.var", "b": "two.var"}
     def_prepare._app_state.terraform_options.backend_use_all_remotes = False
     def_prepare._app_state.backend.remotes = ["x", "y"]
+
+    mock_get_remote_vars = mocker.patch.object(
+        Definition, "get_remote_vars", return_value={"a": "one.var", "b": "two.var"}
+    )
+
     assert def_prepare._get_remotes("def1") == ["one", "two"]
+    mock_get_remote_vars.assert_called_once_with(
+        global_vars=def_prepare._app_state.loaded_config.global_vars.remote_vars
+    )
+
     def_prepare._app_state.terraform_options.backend_use_all_remotes = True
     assert def_prepare._get_remotes("def1") == ["x", "y"]
+
+
+def test_get_remotes_with_global_inheritance(def_prepare, mocker, definition):
+    definition.remote_vars = {"local_var": "local.state"}
+    def_prepare._app_state.terraform_options.backend_use_all_remotes = False
+
+    mock_get_remote_vars = mocker.patch.object(
+        Definition,
+        "get_remote_vars",
+        return_value={"local_var": "local.state", "global_var": "global.state"},
+    )
+
+    result = def_prepare._get_remotes("def1")
+    assert result == ["local", "global"]
+    mock_get_remote_vars.assert_called_once_with(
+        global_vars=def_prepare._app_state.loaded_config.global_vars.remote_vars
+    )
 
 
 def test_write_worker_tf(def_prepare, definition, mocker):

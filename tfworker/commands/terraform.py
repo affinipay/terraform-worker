@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from shlex import quote as shlex_quote
 from typing import TYPE_CHECKING, Dict, Union
@@ -68,24 +69,120 @@ class TerraformCommand(BaseCommand):
         from tfworker.definitions.prepare import DefinitionPrepare
 
         def_prep = DefinitionPrepare(self.app_state)
+        definition_names = list(self.app_state.definitions.keys())
 
-        for name in self.app_state.definitions.keys():
-            log.info(f"initializing definition: {name}")
-            def_prep.copy_files(name=name)
-            try:
-                def_prep.render_templates(name=name)
-                def_prep.create_local_vars(name=name)
-                def_prep.create_terraform_vars(name=name)
-                def_prep.create_worker_tf(name=name)
-                def_prep.download_modules(
-                    name=name, stream_output=self.terraform_config.stream_output
-                )
-                def_prep.create_terraform_lockfile(name=name)
-            except TFWorkerException as e:
-                log.error(f"error rendering templates for definition {name}: {e}")
-                self.ctx.exit(1)
+        # Use sequential processing for small numbers of definitions
+        if len(definition_names) < 4:
+            log.info(f"Initializing {len(definition_names)} definitions sequentially")
+            for name in definition_names:
+                log.info(f"initializing definition: {name}")
+                try:
+                    self._prepare_definition(def_prep, name)
+                    self._terraform_init_single(name)
+                except TFWorkerException as e:
+                    log.error(f"Error with definition {name}: {e}")
+                    self.ctx.exit(1)
+            return
 
-            self._exec_terraform_action(name=name, action=TerraformAction.INIT)
+        log.info(f"Initializing {len(definition_names)} definitions in parallel")
+
+        # Phase 1: Prepare all definitions in parallel (file operations)
+        log.info("Phase 1: Preparing definition files in parallel")
+        with ThreadPoolExecutor(
+            max_workers=self.app_state.loaded_config.parallel_options.max_preparation_workers
+        ) as executor:
+            prepare_futures = []
+            for name in definition_names:
+                future = executor.submit(self._prepare_definition, def_prep, name)
+                prepare_futures.append((name, future))
+
+            # Wait for all preparations to complete
+            for name, future in prepare_futures:
+                try:
+                    future.result()
+                    log.debug(f"Completed preparation for definition: {name}")
+                except Exception as e:
+                    log.error(f"Error preparing definition {name}: {e}")
+                    self.ctx.exit(1)
+
+        # Phase 2: Run terraform init in parallel (smaller pool)
+        log.info("Phase 2: Running terraform init in parallel")
+        with ThreadPoolExecutor(
+            max_workers=self.app_state.loaded_config.parallel_options.max_init_workers
+        ) as executor:
+            init_futures = []
+            for name in definition_names:
+                future = executor.submit(self._terraform_init_single_parallel, name)
+                init_futures.append((name, future))
+
+            for name, future in init_futures:
+                try:
+                    future.result()
+                    log.debug(f"Completed terraform init for definition: {name}")
+                except Exception as e:
+                    log.error(f"Error initializing definition {name}: {e}")
+                    self.ctx.exit(1)
+
+        log.info("All definitions initialized successfully")
+
+    def _prepare_definition(self, def_prep, name: str) -> None:
+        """Prepare a single definition for terraform init"""
+        log.trace(f"preparing definition: {name}")
+        def_prep.copy_files(name=name)
+        try:
+            def_prep.render_templates(name=name)
+            def_prep.create_local_vars(name=name)
+            def_prep.create_terraform_vars(name=name)
+            def_prep.create_worker_tf(name=name)
+            def_prep.download_modules(
+                name=name,
+                stream_output=False,  # Disable streaming for parallel execution
+            )
+            def_prep.create_terraform_lockfile(name=name)
+        except TFWorkerException as e:
+            raise TFWorkerException(f"error preparing definition {name}: {e}") from e
+
+    def _terraform_init_single(self, name: str) -> None:
+        """Run terraform init for a single definition"""
+        log.trace(f"running terraform init for definition: {name}")
+        self._exec_terraform_action(name=name, action=TerraformAction.INIT)
+
+    def _terraform_init_single_parallel(self, name: str) -> None:
+        """Run terraform init for a single definition with captured output for parallel execution"""
+        log.trace(f"running terraform init for definition: {name}")
+
+        definition: Definition = self.app_state.definitions[name]
+        params: str = self.terraform_config.get_params(
+            TerraformAction.INIT, plan_file=definition.plan_file
+        )
+        working_dir: str = definition.get_target_path(
+            self.app_state.root_options.working_dir
+        )
+
+        result: TerraformResult = TerraformResult(
+            *pipe_exec(
+                f"{self.app_state.terraform_options.terraform_bin} {TerraformAction.INIT} {params}",
+                cwd=working_dir,
+                env=self.terraform_config.env,
+                stream_output=False,  # Force no streaming for parallel execution
+            )
+        )
+
+        if result.exit_code != 0:
+            raise TFWorkerException(
+                f"terraform init failed for {name}: {result.stderr.decode()}"
+            )
+
+        # Log the output cleanly for this specific definition
+        log.info(f"Terraform init completed for definition: {name}")
+        if result.stdout:
+            for line in result.stdout.decode().strip().split("\n"):
+                if line.strip():
+                    log.debug(f"[{name}] {line}")
+        if result.stderr:
+            for line in result.stderr.decode().strip().split("\n"):
+                if line.strip():
+                    log.debug(f"[{name}] stderr: {line}")
 
     def terraform_plan(self) -> None:
         from tfworker.definitions.plan import DefinitionPlan
@@ -148,8 +245,11 @@ class TerraformCommand(BaseCommand):
                 f"needs_apply value: {self.app_state.definitions[name].needs_apply}"
             )
             if self.app_state.definitions[name].needs_apply:
-                if not self._app_state.definitions[name].plan_file.exists():
-                    log.info(f"plan file does not exist for definition: {name}; skipping apply")
+                plan_file = self._app_state.definitions[name].plan_file
+                if plan_file is None or not Path(plan_file).exists():
+                    log.info(
+                        f"plan file does not exist for definition: {name}; skipping apply"
+                    )
                     continue
                 log.info(f"running apply for definition: {name}")
                 self._exec_terraform_action(name=name, action=action)
@@ -222,7 +322,8 @@ class TerraformCommand(BaseCommand):
         )
 
         if action == TerraformAction.APPLY:
-            definition.plan_file.unlink(missing_ok=True)
+            if definition.plan_file is not None:
+                Path(definition.plan_file).unlink(missing_ok=True)
 
     def _exec_terraform_pre_plan(self, name: str) -> None:
         """

@@ -185,7 +185,12 @@ class DefinitionPrepare:
             remotes = self._app_state.backend.remotes
         else:
             remotes = list(
-                map(lambda x: x.split(".")[0], definition.remote_vars.values())
+                map(
+                    lambda x: x.split(".")[0],
+                    definition.get_remote_vars(
+                        global_vars=self._app_state.loaded_config.global_vars.remote_vars
+                    ).values(),
+                )
             )
             log.trace(f"using remotes {remotes} for definition {name}")
         return remotes
