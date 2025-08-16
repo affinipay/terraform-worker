@@ -190,7 +190,10 @@ class TestTerraformCommandMethods:
 
     def test_exec_terraform_action_flow(self, tmp_path, mocker):
         cmd = make_command(tmp_path)
-        _ = cmd.app_state.definitions["def"]
+        definition = cmd.app_state.definitions["def"]
+        plan_file = tmp_path / "plan.tfplan"
+        plan_file.touch()
+        definition.plan_file = str(plan_file)
         run = mocker.patch.object(
             cmd, "_run", return_value=TerraformResult(0, b"", b"")
         )
@@ -274,12 +277,31 @@ class TestTerraformCommandMethods:
     def test_terraform_apply_or_destroy(self, tmp_path, mocker):
         cmd = make_command(tmp_path, apply=True)
         cmd.app_state.definitions["def"].needs_apply = True
+        plan_file = tmp_path / "plan.tfplan"
+        plan_file.touch()
+        cmd.app_state.definitions["def"].plan_file = str(plan_file)
         run = mocker.patch.object(cmd, "_exec_terraform_action")
         cmd.terraform_apply_or_destroy()
         run.assert_called_once()
 
         cmd = make_command(tmp_path, destroy=True, limit=["skip"])
         cmd.app_state.definitions["def"].needs_apply = True
+        run = mocker.patch.object(cmd, "_exec_terraform_action")
+        cmd.terraform_apply_or_destroy()
+        run.assert_not_called()
+
+    def test_terraform_apply_or_destroy_no_plan_file(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, apply=True)
+        cmd.app_state.definitions["def"].needs_apply = True
+        cmd.app_state.definitions["def"].plan_file = None
+        run = mocker.patch.object(cmd, "_exec_terraform_action")
+        cmd.terraform_apply_or_destroy()
+        run.assert_not_called()
+
+    def test_terraform_apply_or_destroy_missing_plan_file(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, apply=True)
+        cmd.app_state.definitions["def"].needs_apply = True
+        cmd.app_state.definitions["def"].plan_file = str(tmp_path / "missing.tfplan")
         run = mocker.patch.object(cmd, "_exec_terraform_action")
         cmd.terraform_apply_or_destroy()
         run.assert_not_called()
