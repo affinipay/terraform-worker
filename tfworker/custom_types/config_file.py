@@ -15,7 +15,7 @@ class GlobalVars(FreezableBaseModel):
     terraform_vars: Dict[str, str | bool | list | dict] = Field(
         {}, description="Variables to pass to terraform via a generated .tfvars file."
     )
-    remote_vars: Dict[str, Tuple[str | bool | list | dict]] = Field(
+    remote_vars: Dict[str, str | bool | list | dict] = Field(
         {},
         description="Variables which are used to generate local references to remote state vars.",
     )
