@@ -314,6 +314,15 @@ class TestTerraformCommandMethods:
         assert dp.called
         assert run.called
 
+    def test_terraform_init_parallel(self, tmp_path, mocker):
+        cmd = make_command(tmp_path)
+        cmd.app_state.definitions["def2"] = cmd.app_state.definitions["def"]
+        prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        cmd.terraform_init()
+        assert prepare_mock.call_count == 2
+        assert init_mock.call_count == 2
+
 
 class TestTerraformResult:
     def test_logging_and_file(self, tmp_path, mocker):
