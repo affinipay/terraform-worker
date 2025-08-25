@@ -330,27 +330,11 @@ class TestTerraformCommandMethods:
         for i in range(2, 5):
             cmd.app_state.definitions[f"def{i}"] = cmd.app_state.definitions["def"]
         prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
-        init_mock = mocker.patch.object(cmd, "_terraform_init_single_parallel")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
         cmd.terraform_init()
         assert prepare_mock.call_count == 4
         assert init_mock.call_count == 4
 
-    def test_terraform_init_single_parallel_captured_output(self, tmp_path, mocker):
-        cmd = make_command(tmp_path)
-        mock_pipe_exec = mocker.patch(
-            "tfworker.commands.terraform.pipe_exec",
-            return_value=(0, b"Terraform initialized successfully!", b""),
-        )
-        mock_log_info = mocker.patch("tfworker.commands.terraform.log.info")
-        mock_log_debug = mocker.patch("tfworker.commands.terraform.log.debug")
-
-        cmd._terraform_init_single_parallel("def")
-
-        mock_pipe_exec.assert_called_once()
-        args, kwargs = mock_pipe_exec.call_args
-        assert kwargs["stream_output"] is False
-        mock_log_info.assert_called_with("Terraform init completed for definition: def")
-        mock_log_debug.assert_called_with("[def] Terraform initialized successfully!")
 
 
 class TestTerraformResult:
