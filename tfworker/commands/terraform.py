@@ -65,11 +65,76 @@ class TerraformCommand(BaseCommand):
             log.error(f"error mirroring providers: {e}")
             self.ctx.exit(1)
 
+    def _get_definitions_needing_init(self) -> list[str]:
+        """
+        Determine which definitions need initialization.
+
+        Standard workflow: init -> plan -> apply
+        With --no-plan: init -> apply (but apply is skipped if no plan exists)
+
+        Optimization: In --no-plan mode, if no plan is available, both init and apply
+        will be effectively skipped, so we can skip the time-consuming init entirely.
+
+        Returns:
+            list[str]: List of definition names that need initialization
+        """
+        all_definition_names = list(self.app_state.definitions.keys())
+
+        # If planning is enabled, all definitions need init (for plan generation)
+        if self.app_state.terraform_options.plan:
+            return all_definition_names
+
+        # In apply-only mode, skip init for definitions that have NO plans
+        # (since apply will be skipped anyway without a plan)
+        from tfworker.definitions.plan import DefinitionPlan
+
+        def_plan = DefinitionPlan(self.ctx, self.app_state)
+        definitions_needing_init = []
+
+        for name in all_definition_names:
+            definition = self.app_state.definitions[name]
+
+            # Set up plan file path so we can check if it exists
+            def_plan.set_plan_file(definition)
+
+            # Check if we have a plan available for this definition
+            has_handler_plan = self.app_state.handlers.has_available_plan(definition)
+            has_local_plan = definition.existing_planfile(self.app_state.working_dir)
+
+            if has_handler_plan or has_local_plan:
+                # We have a plan, need init for apply-only mode
+                definitions_needing_init.append(name)
+                if has_handler_plan:
+                    log.info(
+                        f"Will init definition {name}: apply-only mode with plan available from handler"
+                    )
+                else:
+                    log.info(
+                        f"Will init definition {name}: apply-only mode with existing local plan file"
+                    )
+                # Mark as needing apply since we have a plan
+                definition.needs_apply = True
+            else:
+                # No plan available, skip init (and apply will be skipped too)
+                log.info(
+                    f"Skipping init for definition {name}: apply-only mode with no plan available"
+                )
+
+        if not definitions_needing_init:
+            log.info(
+                "No definitions have plans available, skipping all init for apply-only mode"
+            )
+
+        return definitions_needing_init
+
     def terraform_init(self) -> None:
         from tfworker.definitions.prepare import DefinitionPrepare
 
         def_prep = DefinitionPrepare(self.app_state)
-        definition_names = list(self.app_state.definitions.keys())
+        definition_names = self._get_definitions_needing_init()
+
+        if not definition_names:
+            return
 
         # Use sequential processing for small numbers of definitions
         if len(definition_names) < 4:

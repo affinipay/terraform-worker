@@ -81,6 +81,37 @@ class HandlersCollection(Mapping):
     def find_results(self, field, value):
         return [r for r in self._results if getattr(r, field, None) == value]
 
+    def check_plan_conflicts(self, definition: "Definition") -> None:
+        """
+        Check if multiple handlers claim to have a plan for the same definition.
+        Raises HandlerError if conflicts are detected.
+        """
+        handlers_with_plans = []
+
+        for name, handler in self._handlers.items():
+            if handler and handler.is_ready() and handler.has_plan(definition):
+                handlers_with_plans.append(name)
+
+        if len(handlers_with_plans) > 1:
+            raise HandlerError(
+                f"Multiple handlers claim to have a plan for definition '{definition.name}': "
+                f"{', '.join(handlers_with_plans)}. This could lead to inconsistent state."
+            )
+
+    def has_available_plan(self, definition: "Definition") -> bool:
+        """
+        Check if any ready handler has a plan available for the given definition.
+        Returns True if a plan is available, False otherwise.
+        """
+        # First check for conflicts
+        self.check_plan_conflicts(definition)
+
+        # Then check if any handler has a plan
+        for handler in self._handlers.values():
+            if handler and handler.is_ready() and handler.has_plan(definition):
+                return True
+        return False
+
     def freeze(self):
         """
         freeze is used to prevent further modification of the handlers collection.

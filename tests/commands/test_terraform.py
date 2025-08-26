@@ -99,7 +99,9 @@ def make_command(tmp_path, **opts_overrides):
         root_options=RootOpts(),
         loaded_config=SimpleNamespace(
             global_vars=SimpleNamespace(template_vars={}),
-            parallel_options=SimpleNamespace(max_preparation_workers=8, max_init_workers=4)
+            parallel_options=SimpleNamespace(
+                max_preparation_workers=8, max_init_workers=4
+            ),
         ),
         authenticators=[SimpleNamespace(env=lambda: {"AUTH_VAR": "1"})],
         providers="providers",
@@ -335,6 +337,173 @@ class TestTerraformCommandMethods:
         assert prepare_mock.call_count == 4
         assert init_mock.call_count == 4
 
+    def test_terraform_init_proceeds_when_no_plan_and_handler_has_plan(
+        self, tmp_path, mocker
+    ):
+        """Test that init proceeds when --no-plan is set and handler has plan available"""
+        cmd = make_command(tmp_path, plan=False, plan_file_path=None)  # --no-plan
+
+        # Mock handlers collection to indicate plan is available
+        mock_handlers = mocker.MagicMock()
+        mock_handlers.has_available_plan.return_value = True
+        cmd.app_state.handlers = mock_handlers
+
+        # Mock existing_planfile method on Definition class
+        mocker.patch(
+            "tfworker.definitions.model.Definition.existing_planfile",
+            return_value=False,
+        )
+
+        prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+
+        cmd.terraform_init()
+
+        # Should prepare and init since handler has plan to apply
+        assert prepare_mock.call_count == 1
+        assert init_mock.call_count == 1
+        assert cmd.app_state.definitions["def"].needs_apply is True
+
+    def test_terraform_init_proceeds_when_no_plan_and_local_plan_exists(
+        self, tmp_path, mocker
+    ):
+        """Test that init proceeds when --no-plan is set and local plan file exists"""
+        cmd = make_command(tmp_path, plan=False, plan_file_path=None)  # --no-plan
+
+        # Mock handlers collection to indicate no plan available
+        mock_handlers = mocker.MagicMock()
+        mock_handlers.has_available_plan.return_value = False
+        cmd.app_state.handlers = mock_handlers
+
+        # Mock existing_planfile to return True (local plan exists)
+        mocker.patch(
+            "tfworker.definitions.model.Definition.existing_planfile", return_value=True
+        )
+
+        prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+
+        cmd.terraform_init()
+
+        # Should prepare and init since local plan exists to apply
+        assert prepare_mock.call_count == 1
+        assert init_mock.call_count == 1
+        assert cmd.app_state.definitions["def"].needs_apply is True
+
+    def test_terraform_init_skipped_when_no_plan_and_no_plans_available(
+        self, tmp_path, mocker
+    ):
+        """Test that init is skipped when --no-plan is set and no plans are available"""
+        cmd = make_command(tmp_path, plan=False, plan_file_path=None)  # --no-plan
+
+        # Mock handlers collection to indicate no plan available
+        mock_handlers = mocker.MagicMock()
+        mock_handlers.has_available_plan.return_value = False
+        cmd.app_state.handlers = mock_handlers
+
+        # Mock existing_planfile to return False (no local plan)
+        mocker.patch(
+            "tfworker.definitions.model.Definition.existing_planfile",
+            return_value=False,
+        )
+
+        prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+
+        cmd.terraform_init()
+
+        # Should not prepare or init since no plans are available (optimization)
+        assert prepare_mock.call_count == 0
+        assert init_mock.call_count == 0
+
+    def test_terraform_init_always_proceeds_when_plan_enabled(self, tmp_path, mocker):
+        """Test that init always proceeds when planning is enabled (default behavior)"""
+        cmd = make_command(tmp_path, plan=True, plan_file_path=None)  # planning enabled
+
+        # Mock handlers collection to indicate plan is available
+        mock_handlers = mocker.MagicMock()
+        mock_handlers.has_available_plan.return_value = True
+        cmd.app_state.handlers = mock_handlers
+
+        # Mock existing_planfile to return True (local plan exists)
+        mocker.patch(
+            "tfworker.definitions.model.Definition.existing_planfile", return_value=True
+        )
+
+        prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+
+        cmd.terraform_init()
+
+        # Should prepare and init even though plans exist, because planning is enabled
+        assert prepare_mock.call_count == 1
+        assert init_mock.call_count == 1
+
+
+class TestGetDefinitionsNeedingInit:
+    def test_all_definitions_when_plan_enabled(self, tmp_path, mocker):
+        """Test that all definitions are returned when planning is enabled"""
+        cmd = make_command(tmp_path, plan=True, plan_file_path=None)
+        cmd.app_state.definitions = {"def1": mock.Mock(), "def2": mock.Mock()}
+
+        result = cmd._get_definitions_needing_init()
+        assert result == ["def1", "def2"]
+
+    def test_init_needed_when_no_plan_and_plans_available(self, tmp_path, mocker):
+        """Test that init is needed when --no-plan is set and plans are available"""
+        cmd = make_command(tmp_path, plan=False, plan_file_path=None)
+        mock_def = mock.Mock()
+        cmd.app_state.definitions = {"def1": mock_def}
+
+        # Mock handlers to indicate plan available
+        mock_handlers = mock.Mock()
+        mock_handlers.has_available_plan.return_value = True
+        cmd.app_state.handlers = mock_handlers
+
+        # Mock existing_planfile to return False
+        mock_def.existing_planfile.return_value = False
+        mocker.patch("tfworker.definitions.plan.DefinitionPlan.set_plan_file")
+
+        result = cmd._get_definitions_needing_init()
+        assert result == ["def1"]
+        assert mock_def.needs_apply is True
+
+    def test_init_needed_when_no_plan_and_local_plan_exists(self, tmp_path, mocker):
+        """Test that init is needed when --no-plan is set and local plan exists"""
+        cmd = make_command(tmp_path, plan=False, plan_file_path=None)
+        mock_def = mock.Mock()
+        cmd.app_state.definitions = {"def1": mock_def}
+
+        # Mock handlers to indicate no plan available
+        mock_handlers = mock.Mock()
+        mock_handlers.has_available_plan.return_value = False
+        cmd.app_state.handlers = mock_handlers
+
+        # Mock existing_planfile to return True
+        mock_def.existing_planfile.return_value = True
+        mocker.patch("tfworker.definitions.plan.DefinitionPlan.set_plan_file")
+
+        result = cmd._get_definitions_needing_init()
+        assert result == ["def1"]
+        assert mock_def.needs_apply is True
+
+    def test_init_skipped_when_no_plan_and_no_plans_available(self, tmp_path, mocker):
+        """Test that init is skipped when --no-plan is set and no plans are available"""
+        cmd = make_command(tmp_path, plan=False, plan_file_path=None)
+        mock_def = mock.Mock()
+        cmd.app_state.definitions = {"def1": mock_def}
+
+        # Mock handlers to indicate no plan available
+        mock_handlers = mock.Mock()
+        mock_handlers.has_available_plan.return_value = False
+        cmd.app_state.handlers = mock_handlers
+
+        # Mock existing_planfile to return False
+        mock_def.existing_planfile.return_value = False
+        mocker.patch("tfworker.definitions.plan.DefinitionPlan.set_plan_file")
+
+        result = cmd._get_definitions_needing_init()
+        assert result == []
 
 
 class TestTerraformResult:

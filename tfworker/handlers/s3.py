@@ -120,6 +120,24 @@ class S3Handler(BaseHandler):
             self._ready = True
         return self._ready
 
+    def has_plan(self, definition: "Definition") -> bool:
+        """
+        has_plan checks if a remote plan file exists for the given definition.
+        This allows the system to skip init/plan if a plan is already available.
+        """
+        if not self.is_ready():
+            return False
+
+        remotefile = self.get_remote_file(definition.name)
+
+        try:
+            response = self.s3_client.head_object(Bucket=self.bucket, Key=remotefile)
+            return response.get("ContentLength", 0) > 0
+        except botocore.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                return False
+            return False
+
     def get_remote_file(self, name: str) -> str:
         """get_remote_file returns the remote file path for a given name"""
         run_id = self.app_state.root_options.run_id
