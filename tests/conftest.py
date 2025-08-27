@@ -9,6 +9,7 @@ from moto import mock_aws
 
 from tfworker.app_state import AppState
 from tfworker.authenticators import AuthenticatorsCollection
+from tfworker.backends import Backends
 from tfworker.cli_options import CLIOptionsClean, CLIOptionsRoot, CLIOptionsTerraform
 from tfworker.custom_types.config_file import ConfigFile, GlobalVars
 
@@ -46,6 +47,7 @@ def mock_cli_options_root():
     mock_root.region = "us-east-1"
     mock_root.backend_region = "us-east-1"
     mock_root.backend_bucket = "test-bucket"
+    mock_root.backend = Backends.S3
     mock_root.backend_plans = False
     mock_root.backend_prefix = "prefix"
     mock_root.create_backend_bucket = True
@@ -61,6 +63,7 @@ def mock_cli_options_root_backend_west():
     mock_root.region = "us-east-1"
     mock_root.backend_region = "us-west-2"
     mock_root.backend_bucket = "west-test-bucket"
+    mock_root.backend = Backends.S3
     mock_root.backend_plans = False
     mock_root.backend_prefix = "prefix"
     mock_root.create_backend_bucket = True

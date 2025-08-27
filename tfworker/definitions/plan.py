@@ -74,4 +74,8 @@ class DefinitionPlan:
             plan_file.unlink()
             return True, "empty plan file"
 
+        # Check if any handler has a plan available
+        if self._app_state.handlers.has_available_plan(definition):
+            return False, "plan available from handler"
+
         return True, "no plan file"

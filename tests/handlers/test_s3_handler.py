@@ -225,3 +225,52 @@ class TestCheckPlan:
             handler._check_plan("dep", definition)
             del_mock.assert_called_once()
         assert not planfile.exists()
+
+
+class TestHasPlan:
+    def test_handler_not_ready_returns_false(self, mock_app_state):
+        handler = S3Handler()
+        handler._ready = False
+        definition = MagicMock()
+        definition.name = "def"
+        assert handler.has_plan(definition) is False
+
+    def test_no_remote_plan_returns_false(self, handler_with_bucket):
+        handler, _ = handler_with_bucket
+        definition = MagicMock()
+        definition.name = "def"
+        assert handler.has_plan(definition) is False
+
+    def test_empty_remote_plan_returns_false(self, handler_with_bucket):
+        handler, s3 = handler_with_bucket
+        # Ensure backend_plans is enabled for this test
+        handler.app_state.root_options.backend_plans = True
+        definition = MagicMock()
+        definition.name = "def"
+        remotefile = handler.get_remote_file("def")
+        s3.put_object(Bucket=handler.bucket, Key=remotefile, Body=b"")
+        assert handler.has_plan(definition) is False
+
+    def test_existing_remote_plan_returns_true(self, handler_with_bucket):
+        handler, s3 = handler_with_bucket
+        # Ensure backend_plans is enabled for this test
+        handler.app_state.root_options.backend_plans = True
+        definition = MagicMock()
+        definition.name = "def"
+        remotefile = handler.get_remote_file("def")
+        s3.put_object(Bucket=handler.bucket, Key=remotefile, Body=b"plan_data")
+        assert handler.has_plan(definition) is True
+
+    def test_s3_error_returns_false(self, handler_with_bucket, monkeypatch):
+        handler, _ = handler_with_bucket
+        definition = MagicMock()
+        definition.name = "def"
+
+        def raise_error(*args, **kwargs):
+            raise botocore.exceptions.ClientError(
+                {"Error": {"Code": "500"}},
+                "HeadObject",
+            )
+
+        monkeypatch.setattr(handler.s3_client, "head_object", raise_error)
+        assert handler.has_plan(definition) is False
