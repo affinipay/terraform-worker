@@ -337,7 +337,7 @@ class TestTerraformCommandMethods:
         assert prepare_mock.call_count == 4
         assert init_mock.call_count == 4
 
-    def test_terraform_init_proceeds_when_no_plan_and_handler_has_plan(
+    def test_terraform_init_proceeds_no_local_plan_and_handler_has_plan(
         self, tmp_path, mocker
     ):
         """Test that init proceeds when --no-plan is set and handler has plan available"""
@@ -364,7 +364,7 @@ class TestTerraformCommandMethods:
         assert init_mock.call_count == 1
         assert cmd.app_state.definitions["def"].needs_apply is True
 
-    def test_terraform_init_proceeds_when_no_plan_and_local_plan_exists(
+    def test_terraform_init_proceeds_with_local_plan_and_no_handler_plan(
         self, tmp_path, mocker
     ):
         """Test that init proceeds when --no-plan is set and local plan file exists"""
@@ -390,7 +390,7 @@ class TestTerraformCommandMethods:
         assert init_mock.call_count == 1
         assert cmd.app_state.definitions["def"].needs_apply is True
 
-    def test_terraform_init_skipped_when_no_plan_and_no_plans_available(
+    def test_terraform_init_skipped_no_local_plan_and_no_handler_plan(
         self, tmp_path, mocker
     ):
         """Test that init is skipped when --no-plan is set and no plans are available"""
@@ -449,7 +449,9 @@ class TestGetDefinitionsNeedingInit:
         result = cmd._get_definitions_needing_init()
         assert result == ["def1", "def2"]
 
-    def test_init_needed_when_no_plan_and_plans_available(self, tmp_path, mocker):
+    def test_no_plan_with_local_no_local_plan_and_handler_has_plans(
+        self, tmp_path, mocker
+    ):
         """Test that init is needed when --no-plan is set and plans are available"""
         cmd = make_command(tmp_path, plan=False, plan_file_path=None)
         mock_def = mock.Mock()
@@ -468,7 +470,7 @@ class TestGetDefinitionsNeedingInit:
         assert result == ["def1"]
         assert mock_def.needs_apply is True
 
-    def test_init_needed_when_no_plan_and_local_plan_exists(self, tmp_path, mocker):
+    def test_no_plan_with_local_plan_and_no_handler_plan(self, tmp_path, mocker):
         """Test that init is needed when --no-plan is set and local plan exists"""
         cmd = make_command(tmp_path, plan=False, plan_file_path=None)
         mock_def = mock.Mock()
@@ -487,7 +489,7 @@ class TestGetDefinitionsNeedingInit:
         assert result == ["def1"]
         assert mock_def.needs_apply is True
 
-    def test_init_skipped_when_no_plan_and_no_plans_available(self, tmp_path, mocker):
+    def test_no_plan_with_no_local_plan_and_no_handler_plan(self, tmp_path, mocker):
         """Test that init is skipped when --no-plan is set and no plans are available"""
         cmd = make_command(tmp_path, plan=False, plan_file_path=None)
         mock_def = mock.Mock()
