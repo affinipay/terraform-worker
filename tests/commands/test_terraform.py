@@ -507,6 +507,14 @@ class TestGetDefinitionsNeedingInit:
         result = cmd._get_definitions_needing_init()
         assert result == []
 
+    def test_all_definitions_when_not_apply_mode(self, tmp_path, mocker):
+        """Test that all definitions are returned when NOT in apply mode"""
+        cmd = make_command(tmp_path, plan=False, apply=False, plan_file_path=None)
+        cmd.app_state.definitions = {"def1": mock.Mock(), "def2": mock.Mock()}
+
+        result = cmd._get_definitions_needing_init()
+        assert result == ["def1", "def2"]
+
 
 class TestTerraformResult:
     def test_logging_and_file(self, tmp_path, mocker):
