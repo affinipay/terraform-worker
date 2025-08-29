@@ -84,6 +84,10 @@ class TerraformCommand(BaseCommand):
         if self.app_state.terraform_options.plan:
             return all_definition_names
 
+        # If NOT in apply mode, all definitions need init
+        if not self.app_state.terraform_options.apply:
+            return all_definition_names
+
         # In apply-only mode, skip init for definitions that have NO plans
         # (since apply will be skipped anyway without a plan)
         from tfworker.definitions.plan import DefinitionPlan
