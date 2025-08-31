@@ -1,8 +1,25 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from pydantic import ConfigDict, Field
 
 from .freezable_basemodel import FreezableBaseModel
+
+
+class ParallelOptions(FreezableBaseModel):
+    """
+    Configuration options for parallel processing of definitions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_preparation_workers: int = Field(
+        8,
+        description="Maximum number of parallel workers for file preparation operations",
+    )
+    max_init_workers: int = Field(
+        4,
+        description="Maximum number of parallel workers for terraform init operations",
+    )
 
 
 class GlobalVars(FreezableBaseModel):
@@ -15,7 +32,7 @@ class GlobalVars(FreezableBaseModel):
     terraform_vars: Dict[str, str | bool | list | dict] = Field(
         {}, description="Variables to pass to terraform via a generated .tfvars file."
     )
-    remote_vars: Dict[str, Tuple[str | bool | list | dict]] = Field(
+    remote_vars: Dict[str, str | bool | list | dict] = Field(
         {},
         description="Variables which are used to generate local references to remote state vars.",
     )
@@ -43,9 +60,15 @@ class ConfigFile(FreezableBaseModel):
         {}, description="The base worker options, overlaps with command line options"
     )
     handlers: Dict[str, Any] = Field({}, description="The handler configurations.")
+    parallel_options: Optional[ParallelOptions] = Field(
+        default_factory=ParallelOptions,
+        description="Configuration options for parallel processing of definitions.",
+    )
 
     def freeze(self):
         super().freeze()
         if self.global_vars:
             self.global_vars.freeze()
+        if self.parallel_options:
+            self.parallel_options.freeze()
         return self

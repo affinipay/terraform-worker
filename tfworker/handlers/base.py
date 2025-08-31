@@ -37,6 +37,17 @@ class BaseHandler(metaclass=ABCMeta):
         except AttributeError:
             return False
 
+    def has_plan(self, definition: "Definition") -> bool:  # pragma: no cover
+        """
+        has_plan is called to determine if a handler can provide an existing plan
+        for the given definition. This allows handlers to indicate they have a plan
+        available without executing the full plan workflow.
+
+        Returns:
+            bool: True if handler has a plan available for this definition
+        """
+        return False
+
     @abstractmethod
     def execute(
         self,

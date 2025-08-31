@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from shlex import quote as shlex_quote
 from typing import TYPE_CHECKING, Dict, Union
@@ -64,28 +65,138 @@ class TerraformCommand(BaseCommand):
             log.error(f"error mirroring providers: {e}")
             self.ctx.exit(1)
 
+    def _get_definitions_needing_init(self) -> list[str]:
+        """
+        Determine which definitions need initialization.
+
+        Standard workflow: init -> plan -> apply
+        With --no-plan: init -> apply (but apply is skipped if no plan exists)
+
+        Optimization: In --no-plan mode, if no plan is available, both init and apply
+        will be effectively skipped, so we can skip the time-consuming init entirely.
+
+        Returns:
+            list[str]: List of definition names that need initialization
+        """
+        all_definition_names = list(self.app_state.definitions.keys())
+
+        # If planning is enabled, all definitions need init (for plan generation)
+        if self.app_state.terraform_options.plan:
+            return all_definition_names
+
+        # If NOT in apply mode, all definitions need init
+        if not self.app_state.terraform_options.apply:
+            return all_definition_names
+
+        # In apply-only mode, skip init for definitions that have NO plans
+        # (since apply will be skipped anyway without a plan)
+        from tfworker.definitions.plan import DefinitionPlan
+
+        def_plan = DefinitionPlan(self.ctx, self.app_state)
+        definitions_needing_init = []
+
+        for name in all_definition_names:
+            definition = self.app_state.definitions[name]
+
+            # Set up plan file path so we can check if it exists
+            def_plan.set_plan_file(definition)
+
+            # Check if we have a plan available for this definition
+            has_handler_plan = self.app_state.handlers.has_available_plan(definition)
+            has_local_plan = definition.existing_planfile(self.app_state.working_dir)
+
+            if has_handler_plan or has_local_plan:
+                # We have a plan, need init for apply-only mode
+                definitions_needing_init.append(name)
+                if has_handler_plan:
+                    log.info(
+                        f"Will init definition {name}: apply-only mode with plan available from handler"
+                    )
+                else:
+                    log.info(
+                        f"Will init definition {name}: apply-only mode with existing local plan file"
+                    )
+                # Mark as needing apply since we have a plan
+                definition.needs_apply = True
+            else:
+                # No plan available, skip init (and apply will be skipped too)
+                log.info(
+                    f"Skipping init for definition {name}: apply-only mode with no plan available"
+                )
+
+        if not definitions_needing_init:
+            log.info(
+                "No definitions have plans available, skipping all init for apply-only mode"
+            )
+
+        return definitions_needing_init
+
     def terraform_init(self) -> None:
         from tfworker.definitions.prepare import DefinitionPrepare
 
         def_prep = DefinitionPrepare(self.app_state)
+        definition_names = self._get_definitions_needing_init()
 
-        for name in self.app_state.definitions.keys():
-            log.info(f"initializing definition: {name}")
-            def_prep.copy_files(name=name)
-            try:
-                def_prep.render_templates(name=name)
-                def_prep.create_local_vars(name=name)
-                def_prep.create_terraform_vars(name=name)
-                def_prep.create_worker_tf(name=name)
-                def_prep.download_modules(
-                    name=name, stream_output=self.terraform_config.stream_output
-                )
-                def_prep.create_terraform_lockfile(name=name)
-            except TFWorkerException as e:
-                log.error(f"error rendering templates for definition {name}: {e}")
-                self.ctx.exit(1)
+        if not definition_names:
+            return
 
-            self._exec_terraform_action(name=name, action=TerraformAction.INIT)
+        # Use sequential processing for small numbers of definitions
+        if len(definition_names) < 4:
+            log.info(f"Initializing {len(definition_names)} definitions sequentially")
+            for name in definition_names:
+                log.info(f"initializing definition: {name}")
+                try:
+                    self._prepare_definition(def_prep, name)
+                    self._terraform_init_single(name)
+                except TFWorkerException as e:
+                    log.error(f"Error with definition {name}: {e}")
+                    self.ctx.exit(1)
+            return
+
+        log.info(f"Initializing {len(definition_names)} definitions in parallel")
+
+        # Phase 1: Prepare all definitions in parallel (file operations)
+        log.info("Phase 1: Preparing definition files in parallel")
+        with ThreadPoolExecutor(
+            max_workers=self.app_state.loaded_config.parallel_options.max_preparation_workers
+        ) as executor:
+            prepare_futures = []
+            for name in definition_names:
+                future = executor.submit(self._prepare_definition, def_prep, name)
+                prepare_futures.append((name, future))
+
+            # Wait for all preparations to complete
+            for name, future in prepare_futures:
+                try:
+                    future.result()
+                    log.debug(f"Completed preparation for definition: {name}")
+                except Exception as e:
+                    log.error(f"Error preparing definition {name}: {e}")
+                    self.ctx.exit(1)
+
+        # Phase 2: Run terraform init in parallel (smaller pool)
+        log.info("Phase 2: Running terraform init in parallel")
+
+        # Force no streaming output for parallel execution
+        self.terraform_config.force_no_stream_output()
+
+        try:
+            with ThreadPoolExecutor(
+                max_workers=self.app_state.loaded_config.parallel_options.max_init_workers
+            ) as executor:
+                init_futures = []
+                for name in definition_names:
+                    future = executor.submit(self._terraform_init_single, name)
+                    init_futures.append((name, future))
+
+                # Collect results and handle completions
+                show_output = self._app_state.terraform_options.stream_output
+                self._handle_parallel_init_results(init_futures, show_output)
+        finally:
+            # Clear the stream output override
+            self.terraform_config.clear_stream_output_override()
+
+        log.info("All definitions initialized successfully")
 
     def terraform_plan(self) -> None:
         from tfworker.definitions.plan import DefinitionPlan
@@ -148,10 +259,78 @@ class TerraformCommand(BaseCommand):
                 f"needs_apply value: {self.app_state.definitions[name].needs_apply}"
             )
             if self.app_state.definitions[name].needs_apply:
+                plan_file = self._app_state.definitions[name].plan_file
+                if plan_file is None or not Path(plan_file).exists():
+                    log.info(
+                        f"plan file does not exist for definition: {name}; skipping apply"
+                    )
+                    continue
                 log.info(f"running apply for definition: {name}")
                 self._exec_terraform_action(name=name, action=action)
 
-    def _exec_terraform_action(self, name: str, action: TerraformAction) -> None:
+    def _handle_parallel_init_results(self, init_futures, show_output: bool) -> None:
+        """
+        Handle results from parallel terraform init execution.
+
+        Args:
+            init_futures: List of (name, future) tuples from parallel execution
+            show_output: Whether to show successful terraform output (based on original stream_output setting)
+        """
+        for name, future in init_futures:
+            try:
+                result = future.result()
+                log.debug(f"Completed terraform init for definition: {name}")
+
+                # Log successful output only if original stream_output was enabled
+                if show_output and result:
+                    self._log_terraform_result(name, result)
+
+            except (TFWorkerException, KeyError) as e:
+                log.error(f"Error initializing definition {name}: {e}")
+                self.ctx.exit(1)
+
+    def _log_terraform_result(self, name: str, result: "TerraformResult") -> None:
+        """
+        Log terraform result output with definition name prefix.
+
+        Args:
+            name: Definition name for log prefixing
+            result: TerraformResult containing stdout/stderr to log
+        """
+        if result.stdout:
+            for line in result.stdout.decode().strip().split("\n"):
+                if line.strip():
+                    log.info(f"[{name}] {line}")
+        if result.stderr:
+            for line in result.stderr.decode().strip().split("\n"):
+                if line.strip():
+                    log.info(f"[{name}] stderr: {line}")
+
+    def _prepare_definition(self, def_prep, name: str) -> None:
+        """Prepare a single definition for terraform init"""
+        log.trace(f"preparing definition: {name}")
+        def_prep.copy_files(name=name)
+        try:
+            def_prep.render_templates(name=name)
+            def_prep.create_local_vars(name=name)
+            def_prep.create_terraform_vars(name=name)
+            def_prep.create_worker_tf(name=name)
+            def_prep.download_modules(
+                name=name,
+                stream_output=False,  # Disable streaming for parallel execution
+            )
+            def_prep.create_terraform_lockfile(name=name)
+        except TFWorkerException as e:
+            raise TFWorkerException(f"error preparing definition {name}: {e}") from e
+
+    def _terraform_init_single(self, name: str) -> "TerraformResult":
+        """Run terraform init for a single definition"""
+        log.trace(f"running terraform init for definition: {name}")
+        return self._exec_terraform_action(name=name, action=TerraformAction.INIT)
+
+    def _exec_terraform_action(
+        self, name: str, action: TerraformAction
+    ) -> "TerraformResult":
         """
         Execute terraform action
         """
@@ -190,6 +369,16 @@ class TerraformCommand(BaseCommand):
         result = self._run(name, action)
         if result.exit_code:
             log.error(f"error running terraform {action.value} for {name}")
+            # If stream_output was disabled, show the captured output at error level
+            if not self.terraform_config.stream_output:
+                if result.stdout:
+                    for line in result.stdout.decode().strip().split("\n"):
+                        if line.strip():
+                            log.error(f"[{name}] {line}")
+                if result.stderr:
+                    for line in result.stderr.decode().strip().split("\n"):
+                        if line.strip():
+                            log.error(f"[{name}] stderr: {line}")
             self.ctx.exit(1)
 
         try:
@@ -217,6 +406,12 @@ class TerraformCommand(BaseCommand):
             TerraformStage.POST,
             result,
         )
+
+        if action == TerraformAction.APPLY:
+            if definition.plan_file is not None:
+                Path(definition.plan_file).unlink(missing_ok=True)
+
+        return result
 
     def _exec_terraform_pre_plan(self, name: str) -> None:
         """
@@ -477,13 +672,24 @@ class TerraformCommandConfig:
     def __init__(self, app_state: "AppState"):
         self._app_state = app_state
         self._env = None
+        self._force_no_stream_output = False
 
     @classmethod
     def get_config(cls) -> "TerraformCommandConfig":
         return cls._instance
 
+    def force_no_stream_output(self) -> None:
+        """Force stream_output to False (used during parallel execution)"""
+        self._force_no_stream_output = True
+
+    def clear_stream_output_override(self) -> None:
+        """Clear the forced stream_output override"""
+        self._force_no_stream_output = False
+
     @property
     def stream_output(self):
+        if self._force_no_stream_output:
+            return False
         return self._app_state.terraform_options.stream_output
 
     @property

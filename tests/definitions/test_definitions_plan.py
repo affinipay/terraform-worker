@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from tfworker.custom_types import TerraformAction
 from tfworker.definitions.model import Definition
@@ -69,9 +70,45 @@ class TestDefinitionsPlan:
 
     def test_needs_plan_existing_file_no_file(self, mock_click_context, mock_app_state):
         mock_app_state.root_options.backend_plans = True
+
+        # Mock handlers collection to return False for has_available_plan
+        mock_handlers = MagicMock()
+        mock_handlers.has_available_plan.return_value = False
+        mock_app_state.handlers = mock_handlers
+
         dp = DefinitionPlan(mock_click_context, mock_app_state)
         dp.set_plan_file(mock_definition)
         result = dp.needs_plan(mock_definition)
         assert result[0] is True
         assert result[1].startswith("no plan file")
         assert not mock_definition.plan_file.exists()
+
+    def test_needs_plan_handler_has_plan(self, mock_click_context, mock_app_state):
+        mock_app_state.root_options.backend_plans = True
+
+        # Mock handlers collection to return True for has_available_plan
+        mock_handlers = MagicMock()
+        mock_handlers.has_available_plan.return_value = True
+        mock_app_state.handlers = mock_handlers
+
+        dp = DefinitionPlan(mock_click_context, mock_app_state)
+        dp.set_plan_file(mock_definition)
+        result = dp.needs_plan(mock_definition)
+        assert result[0] is False
+        assert result[1] == "plan available from handler"
+        mock_handlers.has_available_plan.assert_called_once_with(mock_definition)
+
+    def test_needs_plan_no_handler_plan(self, mock_click_context, mock_app_state):
+        mock_app_state.root_options.backend_plans = True
+
+        # Mock handlers collection to return False for has_available_plan
+        mock_handlers = MagicMock()
+        mock_handlers.has_available_plan.return_value = False
+        mock_app_state.handlers = mock_handlers
+
+        dp = DefinitionPlan(mock_click_context, mock_app_state)
+        dp.set_plan_file(mock_definition)
+        result = dp.needs_plan(mock_definition)
+        assert result[0] is True
+        assert result[1].startswith("no plan file")
+        mock_handlers.has_available_plan.assert_called_once_with(mock_definition)
