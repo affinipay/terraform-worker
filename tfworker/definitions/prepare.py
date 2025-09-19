@@ -1,6 +1,7 @@
 import json
 from os import environ
 from typing import TYPE_CHECKING, Dict, Union
+from tfworker.util.system import strip_ansi
 
 import jinja2
 
@@ -164,7 +165,7 @@ class DefinitionPrepare:
             log.debug(f"terraform get error: {result.stderr}")
         if result.exit_code != 0:
             raise TFWorkerException(
-                f"could not download modules for definition {name}: {result.stderr}"
+                f"could not download modules for definition {name}: {strip_ansi(result.stderr.decode())}"
             )
 
     def _get_provider_content(self, name: str) -> str:
