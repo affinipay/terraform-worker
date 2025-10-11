@@ -466,7 +466,6 @@ def _get_state_item_from_output(
             f"error parsing remote state item {state}.{item}; output is not in JSON format"
         )
 
-    value = json_output.get("value")
     log.trace(f"remote state item {state}.{item} has value: {value!r}")
     if value is None:
         raise HookError(f"remote state item {state}.{item} has no value")
