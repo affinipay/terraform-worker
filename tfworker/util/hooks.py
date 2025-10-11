@@ -551,6 +551,7 @@ def _make_state_cache(
         return state_cache
     except HookError:
         log.trace("making state cache from terraform refresh failed")
+        raise
 
     if backend:
         try:
