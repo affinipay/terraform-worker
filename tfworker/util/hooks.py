@@ -545,22 +545,25 @@ def _make_state_cache(
         return state_cache
 
     try:
+        log.trace("making state cache from terraform refresh")
         _run_terraform_refresh(terraform_bin, working_dir, env)
         state_json = _run_terraform_show(terraform_bin, working_dir, env)
         _write_state_cache(state_cache, state_json)
         return state_cache
     except HookError:
         log.trace("making state cache from terraform refresh failed")
-        raise
 
     if backend:
+        log.trace("making state cache from backend")
         try:
             state_cache = _get_state_cache_name(working_dir, state)
             state_json = json.dumps(backend.get_state(state))
             _write_state_cache(state_cache, state_json)
             return state_cache
         except NotImplementedError:
-            raise HookError("all methods to make the state cache failed")
+            log.trace("backend does not support get_state")
+
+    raise HookError("all methods to make the state cache failed")
 
 
 def _read_state_cache(cache_file: str) -> Dict[str, Any]:
@@ -573,6 +576,7 @@ def _read_state_cache(cache_file: str) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: The state cache JSON.
     """
+    log.trace(f"Reading state cache from {cache_file}")
     with open(cache_file, "r") as f:
         return json.load(f)
 
@@ -702,6 +706,7 @@ def _write_state_cache(state_cache: str, state_json: str) -> None:
     Raises:
         HookError: If there is an error writing the state cache.
     """
+    log.trace(f"Writing state cache to {state_cache}")
     try:
         with open(state_cache, "w") as f:
             f.write(state_json)
