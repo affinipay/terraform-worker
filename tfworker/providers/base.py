@@ -81,11 +81,14 @@ class BaseProvider:
         return "\n".join(result)
 
     def required(self):
+        # Ensure version constraints are Terraform-compatible when rendered
+        from tfworker.util.terraform_helpers import specifier_to_terraform
+
         return "\n".join(
             [
                 f"    {self.tag} = {{",
                 f'      source = "{self.source}"',
-                f'      version = "{self.version}"',
+                f'      version = "{specifier_to_terraform(self.version)}"',
                 "     }\n",
             ]
         )

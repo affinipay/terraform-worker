@@ -1,44 +1,38 @@
-# AGENT INSTRUCTIONS
+# Repository Guidelines
 
-## Workflow
-- Use Poetry (`poetry install --with dev`)
-- Run: `make test`, `make lint`, `make format`, `make typecheck`
-- Use `poetry run` for all tools
+## Project Structure & Module Organization
+- Source code lives in `tfworker/`; CLI entrypoints in `tfworker/commands/`.
+- Tests mirror the source tree in `tests/` (e.g., `tfworker/foo/bar.py` → `tests/foo/test_bar.py`).
+- Keep modules single‑purpose, use `snake_case.py` filenames, and avoid mixed responsibilities.
 
-## Testing
-- Mirror `tfworker/` → `tests/`
-- Coverage: >98% new, >90% overall
-- Use `pytest-cov`
-- Organize with `unittest.TestCase` classes
-- Mock with `pytest-mock` or `unittest.mock`
+## Build, Test, and Development Commands
+- Install tooling: `poetry install --with dev`
+- Run tests: `make test` (uses `pytest` with coverage via `pytest-cov`).
+- Lint: `make lint`
+- Format: `make format`
+- Type check: `make typecheck`
+- Use `poetry run <tool>` when invoking tools directly (e.g., `poetry run pytest -k my_test`).
+
+## Coding Style & Naming Conventions
+- Python with 4‑space indents and explicit type hints on public APIs.
+- Naming: `snake_case` for modules/functions, `PascalCase` for classes, `UPPER_SNAKE` for constants.
+- Follow the existing style; prefer minimal diffs over rewrites. Keep functions focused and small.
+
+## Testing Guidelines
+- Frameworks: `pytest` organized with `unittest.TestCase` classes; mock using `pytest-mock` or `unittest.mock`.
+- Coverage: >98% for new/changed code, >90% overall (enforced via `pytest-cov`).
+- Structure: mirror `tfworker/` in `tests/`; test files named `test_<module>.py`.
+- Run locally with `make test` or `poetry run pytest`. Write fast, isolated tests and use dependency injection for seams.
 
 ## Typing
-- Add annotations to all new modules
-- Use `reveal_type()` for clarity
-- Avoid mass inference tools
+- Add annotations to all new modules and public functions; keep them precise.
+- Use `reveal_type()` to clarify uncertain types during development when helpful.
 
-## AI Guidance
-- Include tests unless trivial
-- Use dependency injection
-- Follow structure, coverage, and typing rules
+## Commit & Pull Request Guidelines
+- Commits: imperative mood (“Add X”, not “Added X”); concise subject, descriptive body when needed.
+- PRs must include tests, reference relevant `make` targets run (test/lint/format/typecheck), and briefly explain the rationale and scope. Link issues when applicable.
+- Document notable design decisions or trade‑offs in the PR description.
 
-## Editing Rules
-- Prefer minimal diffs
-- Preserve existing style
-- Avoid full rewrites
-
-## Structure
-- Code: `tfworker/`
-- Tests: `tests/`
-- CLI: `tfworker/commands/`
-
-## Conventions
-- Test names: `test_<module>.py`
-- Modules: `snake_case.py`
-- No mixed-responsibility files
-
-## Pull Requests
-- Include tests
-- Reference `make` targets
-- Explain changes briefly
-- Use imperative commit messages
+## Security & Configuration Tips
+- Never commit secrets or credentials; prefer environment variables for configuration.
+- Follow `.gitignore`; sanitize logs and error messages in tests and code.
