@@ -538,12 +538,13 @@ def _make_state_cache(
     Raises:
         HookError: If there is an error reading or writing the state cache.
     """
-    state_cache = _get_state_cache_name(working_dir)
+    state_cache = _get_state_cache_name(working_dir, state)
     log.trace(f"Creating state cache for {working_dir}")
     if not refresh and os.path.exists(state_cache):
         log.trace("State cache exists, skipping refresh")
         return state_cache
 
+    # this mechanism will not work on pre_init phases
     try:
         log.trace("making state cache from terraform refresh")
         _run_terraform_refresh(terraform_bin, working_dir, env)
