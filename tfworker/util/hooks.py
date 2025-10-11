@@ -156,6 +156,7 @@ def _get_state_item_from_output(
         )
 
     value = json_output.get("value")
+    log.trace(f"Remote state item {state}.{item} has value: {value!r}")
     if value is None:
         raise HookError(f"Remote state item {state}.{item} has no value")
     return json.dumps(value, indent=None, separators=(",", ":"))
