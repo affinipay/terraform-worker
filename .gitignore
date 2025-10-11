@@ -12,3 +12,4 @@ registry.terraform.io/
 .scannerwork/
 coverage.xml
 reports/*
+plans*
