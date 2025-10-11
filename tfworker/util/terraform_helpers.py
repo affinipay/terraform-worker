@@ -4,12 +4,13 @@ import pathlib
 import re
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Dict, List, Union
+
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 import tfworker.util.log as log
 from tfworker.exceptions import TFWorkerException
-from tfworker.util.system import get_platform
 from tfworker.util.hcl_parser import parse_files as parse_hcl_files
+from tfworker.util.system import get_platform
 
 if TYPE_CHECKING:
     from tfworker.providers.collection import (  # pragma: no cover  # noqa: F401
@@ -166,14 +167,19 @@ def _find_required_providers(
     except Exception as e:
         # If the batch parsing fails catastrophically, fallback to per-file parse
         log.debug(f"Batch HCL parsing failed; falling back to per-file: {e}")
-        ok_map, err_map = {}, {f: str(e) for f in []}
+        log.trace("Using per-file HCL parser for required providers")
+        ok_map, err_map = {}, {}
+        from tfworker.util.hcl_parser import (
+            parse_file as parse_hcl_file,  # local import fallback
+        )
+
         for fp in tf_files:
             try:
-                from tfworker.util.hcl_parser import parse_file as parse_hcl_file  # local import fallback
-
                 ok_map[fp] = parse_hcl_file(fp)
             except Exception as ee:
                 err_map[fp] = str(ee)
+    else:
+        log.trace("Using batch HCL parser for required providers")
 
     # Log errors like before and process successes
     for fp, emsg in err_map.items():

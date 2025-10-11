@@ -1,5 +1,4 @@
 import json
-import os
 import stat
 from pathlib import Path
 
@@ -24,10 +23,7 @@ class TestHCLParser:
         # Create a fake go helper that just prints a known JSON
         payload = {"terraform": [{"worker_options": [{"x": 1}]}]}
         fake = tmp_path / "tfworker-hcl2json"
-        fake.write_text(
-            "#!/bin/sh\n" +
-            f"echo '{json.dumps(payload)}'\n"
-        )
+        fake.write_text("#!/bin/sh\n" + f"echo '{json.dumps(payload)}'\n")
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 
         monkeypatch.setenv("TFWORKER_HCL_ENGINE", "go")
@@ -61,10 +57,7 @@ class TestHCLParser:
             "errors": {str(bad): "parse error"},
         }
         fake = tmp_path / "tfworker-hcl2json"
-        fake.write_text(
-            "#!/bin/sh\n" +
-            f"echo '{json.dumps(payload)}'\n"
-        )
+        fake.write_text("#!/bin/sh\n" + f"echo '{json.dumps(payload)}'\n")
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 
         monkeypatch.setenv("TFWORKER_HCL_ENGINE", "go")

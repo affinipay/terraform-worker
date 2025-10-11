@@ -92,7 +92,9 @@ def parse_files(paths: List[str]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, 
         if len(paths) == 1:
             payload = _invoke_go([paths[0]])
             if not isinstance(payload, dict):
-                raise ValueError("unexpected response from Go HCL helper for file input")
+                raise ValueError(
+                    "unexpected response from Go HCL helper for file input"
+                )
             return {paths[0]: payload}, {}
         payload = _invoke_go(["--multi", *paths])
         if not isinstance(payload, dict):
