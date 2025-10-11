@@ -89,77 +89,16 @@ def get_state_item(
     Raises:
         HookError: If the state item is not found in the remote state.
     """
+    log.debug(f"Getting state item {state}.{item}")
     try:
-        log.debug(f"Getting state item {state}.{item} from output")
         return _get_state_item_from_output(working_dir, env, terraform_bin, state, item)
     except FileNotFoundError:
-        log.trace(
-            "Definition is not included in limit; falling back to remote state via terraform refresh"
-        )
+        pass
 
     return _get_state_item_from_remote(
         working_dir, env, terraform_bin, state, item, backend
     )
 
-
-def _get_state_item_from_output(
-    working_dir: str, env: Dict[str, str], terraform_bin: str, state: str, item: str
-) -> str:
-    """
-    Get a single item from the terraform output. This is the preferred
-    mechanism as items will be more guaranteed to be up to date, but it
-    creates problems when the remote state is not set up, like when using
-    --limit.
-
-    Args:
-        working_dir (str): The working directory of the terraform definition.
-        env (Dict[str, str]): The environment variables to pass to the terraform command.
-        terraform_bin (str): The path to the terraform binary.
-        state (str): The state name to get the item from.
-        item (str): The item to get from the state.
-
-    Returns:
-        str: The item from the terraform output in JSON format.
-
-    Raises:
-        HookError: If there is an error reading the remote state item or if the output is empty or not in JSON format.
-    """
-    base_dir, _ = os.path.split(working_dir)
-    try:
-        (exit_code, stdout, stderr) = safe_pipe_exec(
-            f"{terraform_bin} output -json -no-color {item}",
-            cwd=f"{base_dir}/{state}",
-            env=env,
-        )
-    except FileNotFoundError:
-        # the remote state is not setup, likely do to use of --limit
-        # this is acceptable, and is the responsibility of the hook
-        # to ensure it has all values needed for safe execution
-        raise
-
-    if exit_code != 0:
-        raise HookError(
-            f"Error reading remote state item {state}.{item}, details: {stderr.decode()}"
-        )
-
-    if stdout is None:
-        raise HookError(
-            f"Remote state item {state}.{item} is empty; This is completely"
-            " unexpected, failing..."
-        )
-
-    try:
-        json_output = json.loads(stdout)
-    except json.JSONDecodeError:
-        raise HookError(
-            f"Error parsing remote state item {state}.{item}; output is not in JSON format"
-        )
-
-    value = json_output.get("value")
-    log.trace(f"Remote state item {state}.{item} has value: {value!r}")
-    if value is None:
-        raise HookError(f"Remote state item {state}.{item} has no value")
-    return json.dumps(value, indent=None, separators=(",", ":"))
 
 
 def check_hooks(
@@ -471,6 +410,67 @@ def _execute_hook_script(
         )
 
 
+def _get_state_item_from_output(
+    working_dir: str, env: Dict[str, str], terraform_bin: str, state: str, item: str
+) -> str:
+    """
+    Get a single item from the terraform output. This is the preferred
+    mechanism as items will be more guaranteed to be up to date, but it
+    creates problems when the remote state is not set up, like when using
+    --limit.
+
+    Args:
+        working_dir (str): The working directory of the terraform definition.
+        env (Dict[str, str]): The environment variables to pass to the terraform command.
+        terraform_bin (str): The path to the terraform binary.
+        state (str): The state name to get the item from.
+        item (str): The item to get from the state.
+
+    Returns:1
+        str: The item from the terraform output in JSON format.
+
+    Raises:
+        HookError: If there is an error reading the remote state item or if the output is empty or not in JSON format.
+    """
+    base_dir, _ = os.path.split(working_dir)
+    log.trace(f"Getting state item {state}.{item} from terraform output")
+    try:
+        (exit_code, stdout, stderr) = safe_pipe_exec(
+            f"{terraform_bin} output -json -no-color {item}",
+            cwd=f"{base_dir}/{state}",
+            env=env,
+        )
+    except FileNotFoundError:
+        # the remote state is not setup, likely do to use of --limit
+        # this is acceptable, and is the responsibility of the hook
+        # to ensure it has all values needed for safe execution
+        raise
+
+    if exit_code != 0:
+        raise HookError(
+            f"Error reading remote state item {state}.{item}, details: {stderr.decode()}"
+        )
+
+    if stdout is None:
+        raise HookError(
+            f"Remote state item {state}.{item} is empty; This is completely"
+            " unexpected, failing..."
+        )
+
+    try:
+        json_output = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise HookError(
+            f"Error parsing remote state item {state}.{item}; output is not in JSON format"
+        )
+
+    value = json_output.get("value")
+    log.trace(f"Remote state item {state}.{item} has value: {value!r}")
+    if value is None:
+        raise HookError(f"Remote state item {state}.{item} has no value")
+    return json.dumps(value, indent=None, separators=(",", ":"))
+
+
 def _get_state_item_from_remote(
     working_dir: str,
     env: Dict[str, str],
@@ -495,6 +495,7 @@ def _get_state_item_from_remote(
     Raises:
         HookError: If the state item cannot be found or read.
     """
+    log.trace(f"Getting state item {state}.{item} from remote state")
     cache_file = _make_state_cache(working_dir, env, terraform_bin, state, backend)
     state_cache = _read_state_cache(cache_file)
     remote_state = _find_remote_state(state_cache, state)
