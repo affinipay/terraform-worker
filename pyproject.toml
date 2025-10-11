@@ -52,7 +52,7 @@ optional = true
 [tool.poetry.group.dev.dependencies]
 black = "^24.4"
 coverage = "^7.5"
-deepdiff = "^7.0"
+deepdiff = ">=7,<9"
 flake8 = "^7.0"
 ipython = "^8.24"
 isort = "^5.13"
