@@ -2,11 +2,12 @@ import json
 import os
 import pathlib
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Union
 
 import hcl2
 from lark.exceptions import UnexpectedToken
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+import re
 
 import tfworker.util.log as log
 from tfworker.exceptions import TFWorkerException
@@ -236,10 +237,116 @@ def _get_specifier_set(version: str) -> SpecifierSet:
     Returns:
         SpecifierSet: The SpecifierSet for the version.
     """
+    # Support Terraform's pessimistic operator '~>' by expanding it
+    # to an equivalent lower/upper bound pair compatible with
+    # packaging's SpecifierSet.
+    #
+    # Semantics implemented (matching Terraform docs):
+    #   - '~> X'        -> '>= X, < X+1'
+    #   - '~> X.Y'      -> '>= X.Y, < X+1'
+    #   - '~> X.Y.Z'    -> '>= X.Y.Z, < X.(Y+1).0'
+    # Multiple constraints may be comma-separated and combined.
+    def _expand_pessimistic(spec: str) -> str:
+        if "~>" not in spec:
+            return spec
+
+        # Split on commas to process each constraint atomically
+        parts = [p.strip() for p in spec.split(",") if p.strip()]
+        expanded_parts: list[str] = []
+        pess_pattern = re.compile(r"^~>\s*(\d+(?:\.\d+){0,2})\s*$")
+
+        for p in parts:
+            m = pess_pattern.match(p)
+            if not m:
+                # leave non-pessimistic or unsupported tokens as-is
+                expanded_parts.append(p)
+                continue
+
+            ver = m.group(1)
+            nums = [int(x) for x in ver.split(".")]
+            # Determine upper bound based on number of components
+            if len(nums) >= 3:
+                major, minor = nums[0], nums[1]
+                upper = f"{major}.{minor + 1}.0"
+            else:
+                # For '~> X' or '~> X.Y' allow any version before next major
+                upper = f"{nums[0] + 1}"
+
+            # Lower bound is the original version verbatim
+            expanded_parts.append(f">={ver}")
+            expanded_parts.append(f"<{upper}")
+
+        return ",".join(expanded_parts)
+
+    # First, try to parse as-is (normal packaging-compatible spec)
     try:
         return SpecifierSet(version)
     except InvalidSpecifier:
+        # Try expanding '~>' pessimistic constraints
         try:
-            return SpecifierSet(f"=={version}")
+            expanded = _expand_pessimistic(version)
+            return SpecifierSet(expanded)
         except InvalidSpecifier:
-            raise TFWorkerException(f"Invalid version specifier: {version}")
+            # Fallback: if it's a bare version pin like '1.2.3'
+            try:
+                return SpecifierSet(f"=={version}")
+            except InvalidSpecifier:
+                raise TFWorkerException(f"Invalid version specifier: {version}")
+
+
+def specifier_to_terraform(spec: Union[str, SpecifierSet]) -> str:
+    """
+    Convert a Python packaging specifier or string into a Terraform-compatible
+    version constraint string.
+
+    Notes:
+    - Terraform accepts operators like =, !=, >, >=, <, <=, and ~>.
+    - The Python packaging module uses '==' for equality; Terraform expects '='.
+    - For non-specifier strings (including '~> ...'), return as-is.
+
+    Args:
+        spec (Union[str, SpecifierSet]): The specifier to convert.
+
+    Returns:
+        str: A Terraform-compatible constraint string.
+    """
+    # If it's already a string, only normalize equality syntax if present
+    if isinstance(spec, str):
+        return spec.replace("===", "=").replace("==", "=")
+
+    # For SpecifierSet, stringify and then normalize '==' to '='
+    s = str(spec)
+    return s.replace("===", "=").replace("==", "=")
+
+
+def ensure_concrete_version_for_lockfile(version: str) -> str:
+    """
+    Validate that a version string is a single, concrete version suitable for
+    the lockfile's `version` field (not a constraint expression).
+
+    Accepts common semver forms, including pre-release or build metadata
+    (e.g., 1.2.3, 1.2.3-alpha.1, 1.2.3+build.1).
+
+    Raises TFWorkerException if the value looks like a constraint
+    (contains operators such as <, >, !, =, ~, or comma-separated ranges),
+    or doesn't resemble a version.
+    """
+    s = version.strip()
+    # Fast checks for constraint operators or lists
+    if any(ch in s for ch in ("<", ">", "!", "=", "~", ",")):
+        raise TFWorkerException(
+            f"Provider version must be a single version for lockfile, not a constraint: {version}"
+        )
+    if " " in s:
+        raise TFWorkerException(
+            f"Provider version must be a single version for lockfile (no spaces): {version}"
+        )
+
+    # Loose semver-ish validation: digits with dot groups, optional pre-release/build
+    # examples: 1.2.3, 1.2.3-alpha.1, 1.0.0+build.1, 1.2
+    pattern = re.compile(r"^\d+(?:\.\d+)*(?:[-+][0-9A-Za-z\.-]+)?$")
+    if not pattern.match(s):
+        raise TFWorkerException(
+            f"Provider version must be a concrete version for lockfile: {version}"
+        )
+    return s

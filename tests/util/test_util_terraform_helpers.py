@@ -18,7 +18,10 @@ from tfworker.util.terraform_helpers import (
     _not_in_cache,
     _parse_required_providers,
     _write_mirror_configuration,
+    _get_specifier_set,
+    specifier_to_terraform,
 )
+from tfworker.util.terraform import generate_terraform_lockfile
 
 
 @pytest.fixture
@@ -325,3 +328,87 @@ class TestTerraformHelpersFindRequiredProviders:
             f.write(tf_content_b)
         with pytest.raises(TFWorkerException):
             _find_required_providers(str(tmp_path))
+
+
+class TestTerraformHelpersPessimisticOperator:
+    def test_get_specifier_set_pessimistic_major_only(self):
+        # '~> 1' means '>=1, <2'
+        assert _get_specifier_set("~> 1") == SpecifierSet(">=1,<2")
+
+    def test_get_specifier_set_pessimistic_major_minor(self):
+        # '~> 3.0' means '>=3.0, <4'
+        assert _get_specifier_set("~> 3.0") == SpecifierSet(">=3.0,<4")
+
+    def test_get_specifier_set_pessimistic_full(self):
+        # '~> 1.2.3' means '>=1.2.3, <1.3.0'
+        assert _get_specifier_set("~> 1.2.3") == SpecifierSet(">=1.2.3,<1.3.0")
+
+    def test_get_specifier_set_pessimistic_with_additional_constraints(self):
+        # Combined constraints are preserved and expanded
+        s = _get_specifier_set("~> 1.2.3, != 1.2.5")
+        assert s == SpecifierSet(">=1.2.3,<1.3.0,!=1.2.5")
+
+    def test_find_required_providers_with_pessimistic(self, tmp_path):
+        # Ensure HCL parsing and specifier expansion works end-to-end
+        tf_content = """
+        terraform {
+            required_providers {
+                aws = {
+                    source = "hashicorp/aws"
+                    version = "~> 4.10.0"
+                }
+            }
+        }
+        """
+        test_file = tmp_path / "main.tf"
+        with open(test_file, "w") as f:
+            f.write(tf_content)
+
+        providers = _find_required_providers(str(tmp_path))
+        assert providers == {
+            "aws": {
+                "source": "hashicorp/aws",
+                "version": SpecifierSet(">=4.10.0,<4.11.0"),
+            }
+        }
+
+
+class TestSpecifierToTerraform:
+    def test_specifier_to_terraform_from_specset_equality(self):
+        s = SpecifierSet("==1.2.3")
+        assert specifier_to_terraform(s) == "=1.2.3"
+
+    def test_specifier_to_terraform_from_specset_range(self):
+        s = SpecifierSet(">=1.2.3,<1.3.0")
+        out = specifier_to_terraform(s)
+        assert set(out.split(",")) == set(">=1.2.3,<1.3.0".split(","))
+
+    def test_specifier_to_terraform_from_string_terraform_passthrough(self):
+        # Should preserve Terraform's '~>' operator when passed as a string
+        assert specifier_to_terraform("~> 2.4.0") == "~> 2.4.0"
+
+    def test_specifier_to_terraform_from_string_equality(self):
+        assert specifier_to_terraform("==1.0.0") == "=1.0.0"
+
+
+class TestLockfileConcreteVersionValidation:
+    def test_generate_lockfile_raises_on_constraint_version(self, tmp_path):
+        # Build a ProvidersCollection with a constraint instead of a single version
+        providers_odict = {
+            "provider1": {
+                "requirements": {
+                    "source": "hashicorp/provider1",
+                    "version": ">=1.0.0",
+                }
+            },
+        }
+        providers = ProvidersCollection(
+            providers_odict=providers_odict, authenticators=MagicMock()
+        )
+
+        with pytest.raises(TFWorkerException):
+            generate_terraform_lockfile(
+                providers=providers,
+                included_providers=None,
+                cache_dir=str(tmp_path),
+            )

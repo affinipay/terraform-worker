@@ -123,9 +123,12 @@ def generate_terraform_lockfile(
     )
     for provider in providers.values():
         log.trace(f"checking provider {provider} / {provider.gid}")
-        if tfhelpers._not_in_cache(
-            provider.gid, provider.config.requirements.version, cache_dir
-        ):
+        # Validate that the provider version is a concrete version for lockfile
+        concrete_version = tfhelpers.ensure_concrete_version_for_lockfile(
+            provider.config.requirements.version
+        )
+
+        if tfhelpers._not_in_cache(provider.gid, concrete_version, cache_dir):
             log.trace(
                 f"Provider {provider.gid} not in cache, skipping lockfile generation"
             )
@@ -137,12 +140,14 @@ def generate_terraform_lockfile(
             continue
         log.trace(f"Provider {provider.gid} is in cache, adding to lockfile")
         lockfile.append(f'provider "{str(provider.gid)}" {{')
-        lockfile.append(f'  version     = "{provider.config.requirements.version}"')
-        lockfile.append(f'  constraints = "{provider.config.requirements.version}"')
+        lockfile.append(f'  version     = "{concrete_version}"')
+        # Write constraints using Terraform-compatible formatting; this allows
+        # callers to provide either a raw Terraform string or a Python SpecifierSet
+        lockfile.append(
+            f'  constraints = "{tfhelpers.specifier_to_terraform(provider.config.requirements.version)}"'
+        )
         lockfile.append("  hashes = [")
-        for hash in tfhelpers._get_cached_hash(
-            provider.gid, provider.config.requirements.version, cache_dir
-        ):
+        for hash in tfhelpers._get_cached_hash(provider.gid, concrete_version, cache_dir):
             lockfile.append(f'    "{hash}",')
         lockfile.append("  ]")
         lockfile.append("}")
