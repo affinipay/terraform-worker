@@ -229,10 +229,27 @@ def _populate_environment_with_terraform_variables(
     with open(os.path.join(working_dir, WORKER_TFVARS_FILENAME)) as f:
         contents = f.read()
 
-    for line in contents.splitlines():
-        tf_var = line.split("=")
+    for line_num, line in enumerate(contents.splitlines(), start=1):
+        line = line.strip()
+        # Skip empty lines and comments
+        if not line or line.startswith("#"):
+            continue
+
+        # Split on first '=' only to handle values with '=' in them
+        if "=" not in line:
+            log.trace(f"Skipping line {line_num} in {WORKER_TFVARS_FILENAME}: no '=' found")
+            continue
+
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+
+        if not key:
+            log.trace(f"Skipping line {line_num} in {WORKER_TFVARS_FILENAME}: empty key")
+            continue
+
         _set_hook_env_var(
-            local_env, TFHookVarType.VAR, tf_var[0], tf_var[1], b64_encode
+            local_env, TFHookVarType.VAR, key, value, b64_encode
         )
 
 
@@ -265,24 +282,47 @@ def _populate_environment_with_terraform_remote_vars(
         r"\s*(?P<item>\w+)\s*\=.+data\.terraform_remote_state\.(?P<state>\w+)\.outputs\.(?P<state_item>\w+)\s*"
     )
 
-    for line in contents.splitlines():
+    for line_num, line in enumerate(contents.splitlines(), start=1):
+        # Skip empty lines and comments
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+
         m = r.match(line)
         if m:
             item = m.group("item")
             state = m.group("state")
             state_item = m.group("state_item")
-            state_value_json = get_state_item(
-                working_dir, local_env, terraform_path, state, state_item, backend
-            )
-            # Parse the JSON string returned by get_state_item to get the actual value
+
+            if not item or not state or not state_item:
+                log.trace(
+                    f"Skipping line {line_num} in {WORKER_LOCALS_FILENAME}: "
+                    f"invalid remote state reference"
+                )
+                continue
+
             try:
-                state_value = json.loads(state_value_json)
-            except json.JSONDecodeError:
-                # Fall back to the raw string if parsing fails
-                state_value = state_value_json
-            _set_hook_env_var(
-                local_env, TFHookVarType.REMOTE, item, state_value, b64_encode
-            )
+                state_value_json = get_state_item(
+                    working_dir, local_env, terraform_path, state, state_item, backend
+                )
+                # Parse the JSON string returned by get_state_item to get the actual value
+                try:
+                    state_value = json.loads(state_value_json)
+                except json.JSONDecodeError:
+                    log.trace(
+                        f"Failed to parse JSON for {state}.{state_item}, using raw value"
+                    )
+                    # Fall back to the raw string if parsing fails
+                    state_value = state_value_json
+
+                _set_hook_env_var(
+                    local_env, TFHookVarType.REMOTE, item, state_value, b64_encode
+                )
+            except HookError as e:
+                log.error(
+                    f"Failed to get remote state value {state}.{state_item} "
+                    f"for variable {item}: {e}"
+                )
+                raise
 
 
 def _populate_environment_with_extra_vars(
@@ -314,16 +354,9 @@ def _set_hook_env_var(
         local_env (Dict[str, str]): The environment variables.
         var_type (TFHookVarType): The type of the variable.
         key (str): The key of the variable.
-        value (str): The value of the variable.
+        value (Any): The value of the variable (any Python type).
         b64_encode (bool, optional): If True, the value will be base64 encoded. Defaults to False.
     """
-    # JSON-encode complex mapping/sequence types for EXTRA vars; leave scalars as-is
-    if var_type == TFHookVarType.EXTRA and isinstance(value, (dict, list, tuple)):
-        try:
-            value = json.dumps(value)
-        except Exception:
-            value = str(value)
-
     # Normalize the key into a safe env var suffix
     key_replace_items = {" ": "", '"': "", "-": "_", ".": "_"}
     for k, v in key_replace_items.items():
