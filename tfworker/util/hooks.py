@@ -433,7 +433,7 @@ def _get_state_item_from_output(
         HookError: If there is an error reading the remote state item or if the output is empty or not in JSON format.
     """
     base_dir, _ = os.path.split(working_dir)
-    log.trace(f"Getting state item {state}.{item} from terraform output")
+    log.trace(f"getting state item {state}.{item} from terraform output")
     try:
         (exit_code, stdout, stderr) = safe_pipe_exec(
             f"{terraform_bin} output -json -no-color {item}",
@@ -448,12 +448,14 @@ def _get_state_item_from_output(
 
     if exit_code != 0:
         raise HookError(
-            f"Error reading remote state item {state}.{item}, details: {stderr.decode()}"
+            f"error reading remote state item {state}.{item}, details: {stderr.decode()}"
         )
+
+    log.trace(f"raw output for remote state item {state}.{item}: {stdout!r}")
 
     if stdout is None:
         raise HookError(
-            f"Remote state item {state}.{item} is empty; This is completely"
+            f"remote state item {state}.{item} is empty; This is completely"
             " unexpected, failing..."
         )
 
@@ -461,13 +463,13 @@ def _get_state_item_from_output(
         json_output = json.loads(stdout)
     except json.JSONDecodeError:
         raise HookError(
-            f"Error parsing remote state item {state}.{item}; output is not in JSON format"
+            f"error parsing remote state item {state}.{item}; output is not in JSON format"
         )
 
     value = json_output.get("value")
-    log.trace(f"Remote state item {state}.{item} has value: {value!r}")
+    log.trace(f"remote state item {state}.{item} has value: {value!r}")
     if value is None:
-        raise HookError(f"Remote state item {state}.{item} has no value")
+        raise HookError(f"remote state item {state}.{item} has no value")
     return json.dumps(value, indent=None, separators=(",", ":"))
 
 
@@ -495,7 +497,7 @@ def _get_state_item_from_remote(
     Raises:
         HookError: If the state item cannot be found or read.
     """
-    log.trace(f"Getting state item {state}.{item} from remote state")
+    log.trace(f"getting state item {state}.{item} from remote state")
     cache_file = _make_state_cache(working_dir, env, terraform_bin, state, backend)
     state_cache = _read_state_cache(cache_file)
     remote_state = _find_remote_state(state_cache, state)
@@ -513,7 +515,6 @@ def _get_state_cache_name(working_dir: str, state: str | None = None) -> str:
     Returns:
         str: The name of the state cache file.
     """
-    log.trace(f"Getting state cache name for {working_dir}")
     if state:
         return f"{working_dir}/{state}_{TF_STATE_CACHE_NAME}"
     return f"{working_dir}/{TF_STATE_CACHE_NAME}"
@@ -540,11 +541,11 @@ def _make_state_cache(
         HookError: If there is an error reading or writing the state cache.
     """
     state_cache = _get_state_cache_name(working_dir, state)
-    log.trace(f"Creating state cache for {working_dir}")
     if not refresh and os.path.exists(state_cache):
-        log.trace("State cache exists, skipping refresh")
+        log.trace("state cache exists, skipping refresh")
         return state_cache
 
+    log.trace(f"creating state cache for {working_dir}")
     # this mechanism will not work on pre_init phases
     try:
         log.trace("making state cache from terraform refresh")
