@@ -271,9 +271,15 @@ def _populate_environment_with_terraform_remote_vars(
             item = m.group("item")
             state = m.group("state")
             state_item = m.group("state_item")
-            state_value = get_state_item(
+            state_value_json = get_state_item(
                 working_dir, local_env, terraform_path, state, state_item, backend
             )
+            # Parse the JSON string returned by get_state_item to get the actual value
+            try:
+                state_value = json.loads(state_value_json)
+            except json.JSONDecodeError:
+                # Fall back to the raw string if parsing fails
+                state_value = state_value_json
             _set_hook_env_var(
                 local_env, TFHookVarType.REMOTE, item, state_value, b64_encode
             )
