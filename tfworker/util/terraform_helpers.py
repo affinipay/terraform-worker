@@ -4,14 +4,12 @@ import pathlib
 import re
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Dict, List, Union
-
-import hcl2
-from lark.exceptions import UnexpectedToken
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 import tfworker.util.log as log
 from tfworker.exceptions import TFWorkerException
 from tfworker.util.system import get_platform
+from tfworker.util.hcl_parser import parse_files as parse_hcl_files
 
 if TYPE_CHECKING:
     from tfworker.providers.collection import (  # pragma: no cover  # noqa: F401
@@ -151,21 +149,41 @@ def _find_required_providers(
         Dict[str, Dict[str, ProviderRequirements]]: A dictionary of required providers.
     """
     providers = {}
+    # Collect all .tf files first
+    tf_files: List[str] = []
     for root, _, files in os.walk(search_dir, followlinks=True):
         for file in files:
             if file.endswith(".tf"):
-                with open(f"{root}/{file}", "r") as f:
-                    try:
-                        content = hcl2.load(f)
-                    except UnexpectedToken as e:
-                        log.info(
-                            f"not processing {root}/{file} for required providers; see debug output for HCL parsing errors"
-                        )
-                        log.debug(f"HCL processing errors in {root}/{file}: {e}")
-                        continue
-                    _update_parsed_providers(
-                        providers, _parse_required_providers(content)
-                    )
+                tf_files.append(f"{root}/{file}")
+
+    if not tf_files:
+        log.trace("No .tf files found for required providers search")
+        return providers
+
+    # Parse in batch when possible
+    try:
+        ok_map, err_map = parse_hcl_files(tf_files)
+    except Exception as e:
+        # If the batch parsing fails catastrophically, fallback to per-file parse
+        log.debug(f"Batch HCL parsing failed; falling back to per-file: {e}")
+        ok_map, err_map = {}, {f: str(e) for f in []}
+        for fp in tf_files:
+            try:
+                from tfworker.util.hcl_parser import parse_file as parse_hcl_file  # local import fallback
+
+                ok_map[fp] = parse_hcl_file(fp)
+            except Exception as ee:
+                err_map[fp] = str(ee)
+
+    # Log errors like before and process successes
+    for fp, emsg in err_map.items():
+        log.info(
+            f"not processing {fp} for required providers; see debug output for HCL parsing errors"
+        )
+        log.debug(f"HCL processing errors in {fp}: {emsg}")
+
+    for fp, content in ok_map.items():
+        _update_parsed_providers(providers, _parse_required_providers(content))
     log.trace(
         f"Found required providers: {[x for x in providers.keys()]} in {search_dir}"
     )
