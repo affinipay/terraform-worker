@@ -10,18 +10,18 @@ from tfworker.exceptions import TFWorkerException
 from tfworker.providers import ProviderGID
 from tfworker.providers.collection import ProvidersCollection
 from tfworker.util.system import get_platform
+from tfworker.util.terraform import generate_terraform_lockfile
 from tfworker.util.terraform_helpers import (
     _create_mirror_configuration,
     _find_required_providers,
     _get_cached_hash,
     _get_provider_cache_dir,
+    _get_specifier_set,
     _not_in_cache,
     _parse_required_providers,
     _write_mirror_configuration,
-    _get_specifier_set,
     specifier_to_terraform,
 )
-from tfworker.util.terraform import generate_terraform_lockfile
 
 
 @pytest.fixture

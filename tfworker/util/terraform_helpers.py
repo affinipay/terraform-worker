@@ -1,13 +1,13 @@
 import json
 import os
 import pathlib
+import re
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Dict, List, Union
 
 import hcl2
 from lark.exceptions import UnexpectedToken
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
-import re
 
 import tfworker.util.log as log
 from tfworker.exceptions import TFWorkerException
@@ -237,6 +237,7 @@ def _get_specifier_set(version: str) -> SpecifierSet:
     Returns:
         SpecifierSet: The SpecifierSet for the version.
     """
+
     # Support Terraform's pessimistic operator '~>' by expanding it
     # to an equivalent lower/upper bound pair compatible with
     # packaging's SpecifierSet.
