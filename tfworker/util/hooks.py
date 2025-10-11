@@ -155,7 +155,10 @@ def _get_state_item_from_output(
             f"Error parsing remote state item {state}.{item}; output is not in JSON format"
         )
 
-    return json.dumps(json_output, indent=None, separators=(",", ":"))
+    value = json_output.get("value")
+    if value is None:
+        raise HookError(f"Remote state item {state}.{item} has no value")
+    return json.dumps(value, indent=None, separators=(",", ":"))
 
 
 def check_hooks(
