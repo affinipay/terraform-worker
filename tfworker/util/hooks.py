@@ -634,7 +634,7 @@ def _get_item_from_remote_state(
     """
     if item in remote_state["values"]["outputs"]:
         return json.dumps(
-            remote_state["values"]["outputs"][item],
+            remote_state["values"]["outputs"][item]["value"],
             indent=None,
             separators=(",", ":"),
         )
