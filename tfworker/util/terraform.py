@@ -147,7 +147,9 @@ def generate_terraform_lockfile(
             f'  constraints = "{tfhelpers.specifier_to_terraform(provider.config.requirements.version)}"'
         )
         lockfile.append("  hashes = [")
-        for hash in tfhelpers._get_cached_hash(provider.gid, concrete_version, cache_dir):
+        for hash in tfhelpers._get_cached_hash(
+            provider.gid, concrete_version, cache_dir
+        ):
             lockfile.append(f'    "{hash}",')
         lockfile.append("  ]")
         lockfile.append("}")

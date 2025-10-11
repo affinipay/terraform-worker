@@ -1,7 +1,6 @@
 import json
 from os import environ
 from typing import TYPE_CHECKING, Dict, Union
-from tfworker.util.system import strip_ansi
 
 import jinja2
 
@@ -15,7 +14,7 @@ from tfworker.constants import (
 )
 from tfworker.copier import Copier, CopyFactory
 from tfworker.exceptions import ReservedFileError, TFWorkerException
-from tfworker.util.system import pipe_exec
+from tfworker.util.system import pipe_exec, strip_ansi
 from tfworker.util.terraform import generate_terraform_lockfile
 
 if TYPE_CHECKING:

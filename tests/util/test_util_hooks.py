@@ -1,3 +1,5 @@
+import base64
+import shlex
 from unittest import mock
 
 import pytest
@@ -269,6 +271,56 @@ class TestHelperFunctions:
             local_env, hooks.TFHookVarType.VAR, "key", "value", False
         )
         assert local_env["TF_VAR_KEY"] == "value"
+
+    @pytest.mark.parametrize("b64_encode", [False, True])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"a": 1, "b": [2, 3]},
+            [1, 2, 3],
+        ],
+    )
+    def test_set_hook_env_var_complex_parametrized(self, value, b64_encode):
+        local_env = {}
+        hooks._set_hook_env_var(
+            local_env, hooks.TFHookVarType.EXTRA, "complex", value, b64_encode
+        )
+        stored = local_env["TF_EXTRA_COMPLEX"]
+        assert isinstance(stored, str)
+        if b64_encode:
+            decoded_json = base64.b64decode(stored).decode()
+            assert value == __import__("json").loads(decoded_json)
+        else:
+            # recover original JSON string by shell splitting
+            decoded = shlex.split(stored)[0]
+            assert value == __import__("json").loads(decoded)
+
+    @pytest.mark.parametrize("b64_encode", [False, True])
+    def test_set_hook_env_var_simple_and_bool_parametrized(self, b64_encode):
+        local_env = {}
+        simple_value = "hello world"
+        hooks._set_hook_env_var(
+            local_env, hooks.TFHookVarType.VAR, "simple", simple_value, b64_encode
+        )
+        stored_simple = local_env["TF_VAR_SIMPLE"]
+        assert isinstance(stored_simple, str)
+        if b64_encode:
+            assert base64.b64decode(stored_simple).decode() == simple_value
+        else:
+            assert shlex.split(stored_simple)[0] == simple_value
+
+        # Also verify boolean handling
+        local_env_bool = {}
+        hooks._set_hook_env_var(
+            local_env_bool, hooks.TFHookVarType.EXTRA, "flag", True, b64_encode
+        )
+        stored_flag = local_env_bool["TF_EXTRA_FLAG"]
+        if b64_encode:
+            # booleans base64-encode to their JSON literal for non-strings
+            assert base64.b64decode(stored_flag).decode() == "true"
+        else:
+            # non-b64 keeps TRUE uppercasing
+            assert shlex.split(stored_flag)[0] == "TRUE"
 
     @mock.patch("tfworker.util.hooks.pipe_exec")
     def test_execute_hook_script(self, mock_pipe_exec, capsys):

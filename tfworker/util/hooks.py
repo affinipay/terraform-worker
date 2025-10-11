@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import shlex
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Union
 
@@ -354,7 +355,7 @@ def _set_hook_env_var(
     local_env: Dict[str, str],
     var_type: TFHookVarType,
     key: str,
-    value: str,
+    value: Any,
     b64_encode: bool = False,
 ) -> None:
     """
@@ -367,31 +368,54 @@ def _set_hook_env_var(
         value (str): The value of the variable.
         b64_encode (bool, optional): If True, the value will be base64 encoded. Defaults to False.
     """
-    # JSON-encode complex types for EXTRA vars if not already a string
-    if var_type == TFHookVarType.EXTRA and not isinstance(value, str):
+    # JSON-encode complex mapping/sequence types for EXTRA vars; leave scalars as-is
+    if var_type == TFHookVarType.EXTRA and isinstance(value, (dict, list, tuple)):
         try:
             value = json.dumps(value)
         except Exception:
             value = str(value)
 
+    # Normalize the key into a safe env var suffix
     key_replace_items = {" ": "", '"': "", "-": "_", ".": "_"}
-    val_replace_items = {" ": "", '"': "", "\n": ""}
-
     for k, v in key_replace_items.items():
         key = key.replace(k, v)
 
-    for k, v in val_replace_items.items():
-        if isinstance(value, str):
-            value = value.replace(k, v)
-        if isinstance(value, bytes):
-            value = value.decode().replace(k, v)
-        if isinstance(value, bool):
-            value = str(value).upper()
-
+    # If base64 encoding is requested, do not mutate the value except for encoding to str
     if b64_encode:
-        value = base64.b64encode(value.encode())
+        if isinstance(value, bytes):
+            raw_bytes = value
+        elif isinstance(value, str):
+            raw_bytes = value.encode()
+        else:
+            # Fall back to JSON/str then bytes to avoid lossy transforms
+            try:
+                raw_bytes = json.dumps(value).encode()
+            except Exception:
+                raw_bytes = str(value).encode()
 
-    local_env[f"{var_type}_{key.upper()}"] = value
+        # Base64-encode and store as a string to satisfy env type requirements
+        encoded = base64.b64encode(raw_bytes).decode()
+        local_env[f"{var_type}_{key.upper()}"] = encoded
+        return
+
+    # For non-base64 values, ensure we end up with a string and shell-escape it
+    # If the object is a complex type (e.g., dict or list), JSON-encode first
+    if isinstance(value, bytes):
+        value_str = value.decode()
+    elif isinstance(value, bool):
+        value_str = str(value).upper()
+    elif isinstance(value, (dict, list, tuple)):
+        try:
+            value_str = json.dumps(value)
+        except Exception:
+            value_str = str(value)
+    else:
+        value_str = str(value)
+
+    # Use shlex.quote to safely escape values for shell consumption by hooks
+    value_escaped = shlex.quote(value_str)
+
+    local_env[f"{var_type}_{key.upper()}"] = value_escaped
 
 
 def _execute_hook_script(
