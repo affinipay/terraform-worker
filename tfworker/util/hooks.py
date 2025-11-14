@@ -328,9 +328,24 @@ def _populate_environment_with_terraform_remote_vars(
             item = m.group("item")
             state = m.group("state")
             state_item = m.group("state_item")
-            state_value = get_state_item(
+            state_value_json = get_state_item(
                 working_dir, local_env, terraform_path, state, state_item, backend
             )
+
+            # Parse the Terraform output JSON to extract just the value field
+            # Terraform output format is: {"value": <actual_value>, "type": <type>, "sensitive": <bool>}
+            try:
+                state_output = json.loads(state_value_json)
+                # Extract just the value field from the Terraform output structure
+                if isinstance(state_output, dict) and "value" in state_output:
+                    state_value = state_output["value"]
+                else:
+                    # Fallback to the raw value if it's not in the expected format
+                    state_value = state_value_json
+            except (json.JSONDecodeError, TypeError):
+                # If parsing fails, use the raw value
+                state_value = state_value_json
+
             _set_hook_env_var(
                 local_env, TFHookVarType.REMOTE, item, state_value, b64_encode
             )
@@ -406,7 +421,8 @@ def _set_hook_env_var(
         value_str = str(value).upper()
     elif isinstance(value, (dict, list, tuple)):
         try:
-            value_str = json.dumps(value)
+            # Use compact JSON formatting to match the rest of the codebase
+            value_str = json.dumps(value, separators=(",", ":"))
         except Exception:
             value_str = str(value)
     else:
