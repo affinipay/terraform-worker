@@ -388,6 +388,51 @@ class TestHelperFunctions:
         assert local_env["TF_REMOTE_LOCAL_KEY"] == "value"
         assert local_env["TF_REMOTE_LOCAL_ANOTHER_KEY"] == "another_value"
 
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    @mock.patch("tfworker.util.hooks.os.path.isfile", return_value=True)
+    @mock.patch(
+        "tfworker.util.hooks.get_state_item",
+        side_effect=[
+            '{"value":"staging","type":"string"}',
+            '{"value":true,"type":"bool"}',
+            '{"value":{"key":"val"},"type":"object"}',
+            '{"value":["a","b","c"],"type":"list"}',
+        ],
+    )
+    def test_populate_environment_with_terraform_remote_vars_realistic_json(
+        self, mock_get_state_item, mock_isfile, mock_open
+    ):
+        """Test that remote vars correctly extract values from Terraform's JSON output format."""
+        mock_terraform_locals = """
+            local_key = data.terraform_remote_state.remote1.outputs.environment
+            local_flag = data.terraform_remote_state.remote2.outputs.enabled
+            local_config = data.terraform_remote_state.remote3.outputs.config
+            local_items = data.terraform_remote_state.remote4.outputs.items
+        """
+        mock_open.return_value.read.return_value = mock_terraform_locals
+
+        local_env = {}
+        hooks._populate_environment_with_terraform_remote_vars(
+            local_env, "working_dir", "terraform_path", False, None
+        )
+
+        # Simple string should be unquoted
+        assert "TF_REMOTE_LOCAL_KEY" in local_env.keys()
+        assert local_env["TF_REMOTE_LOCAL_KEY"] == "staging"
+
+        # Boolean should be uppercase
+        assert "TF_REMOTE_LOCAL_FLAG" in local_env.keys()
+        assert local_env["TF_REMOTE_LOCAL_FLAG"] == "TRUE"
+
+        # Complex object should be JSON-encoded and shlex-escaped
+        assert "TF_REMOTE_LOCAL_CONFIG" in local_env.keys()
+        # shlex.quote wraps JSON in single quotes
+        assert local_env["TF_REMOTE_LOCAL_CONFIG"] == """'{"key":"val"}'"""
+
+        # List should be JSON-encoded and shlex-escaped
+        assert "TF_REMOTE_LOCAL_ITEMS" in local_env.keys()
+        assert local_env["TF_REMOTE_LOCAL_ITEMS"] == """'["a","b","c"]'"""
+
     def test_populate_environment_with_extra_vars(self):
         local_env = {}
         extra_vars = {"extra_key": "extra_value"}
