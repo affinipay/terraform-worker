@@ -110,39 +110,34 @@ def get_state_item(
             if state_cache is not None:
                 state_cache[state] = state_data
 
-        # Extract the remote state outputs
-        # Navigate: state["values"]["root_module"]["resources"]
-        # Find: resource where type=="terraform_remote_state" and name==state
-        # Extract: resource["values"]["outputs"][item]
+        # Extract the output from the state file's top-level outputs section
+        # State file format from backend.get_state() is:
+        # {
+        #   "version": 4,
+        #   "outputs": {
+        #     "output_name": {
+        #       "value": <actual_value>,
+        #       "type": <type>
+        #     }
+        #   }
+        # }
 
         if not isinstance(state_data, dict):
             raise HookError(f"Invalid state data for {state}")
 
-        resources = (
-            state_data.get("values", {}).get("root_module", {}).get("resources", [])
-        )
+        # Get the top-level outputs section
+        outputs = state_data.get("outputs", {})
+        if not outputs:
+            raise HookError(f"No outputs found in state '{state}'")
 
-        remote_state_resource = None
-        for resource in resources:
-            if (
-                resource.get("type") == "terraform_remote_state"
-                and resource.get("name") == state
-            ):
-                remote_state_resource = resource
-                break
-
-        if not remote_state_resource:
-            raise HookError(f"Remote state resource '{state}' not found in state data")
-
-        outputs = remote_state_resource.get("values", {}).get("outputs", {})
         if item not in outputs:
-            raise HookError(f"Output '{item}' not found in remote state '{state}'")
+            raise HookError(f"Output '{item}' not found in state '{state}'")
 
-        output_value = outputs[item]
+        output_data = outputs[item]
 
         # Return in Terraform output format for consistency
-        # The output from backend is already in the correct format
-        return json.dumps(output_value, separators=(",", ":"))
+        # The output is already in the correct format: {"value": ..., "type": ...}
+        return json.dumps(output_data, separators=(",", ":"))
 
     except NotImplementedError:
         raise HookError(

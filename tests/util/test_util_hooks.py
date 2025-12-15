@@ -24,25 +24,11 @@ class TestGetStateItem:
     def test_get_state_item_success(self):
         """Test successful retrieval of state item from backend"""
         mock_backend = mock.Mock()
+        # Mock the actual state file format from backend.get_state()
         mock_backend.get_state.return_value = {
-            "values": {
-                "root_module": {
-                    "resources": [
-                        {
-                            "type": "terraform_remote_state",
-                            "name": "test_state",
-                            "values": {
-                                "outputs": {
-                                    "test_item": {
-                                        "value": "test_value",
-                                        "type": "string",
-                                    }
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
+            "version": 4,
+            "outputs": {"test_item": {"value": "test_value", "type": "string"}},
+            "resources": [],
         }
 
         result = hooks.get_state_item(
@@ -59,23 +45,14 @@ class TestGetStateItem:
     def test_get_state_item_with_cache(self):
         """Test that state caching prevents multiple backend calls"""
         mock_backend = mock.Mock()
+        # Mock the actual state file format
         state_data = {
-            "values": {
-                "root_module": {
-                    "resources": [
-                        {
-                            "type": "terraform_remote_state",
-                            "name": "cached_state",
-                            "values": {
-                                "outputs": {
-                                    "item1": {"value": "value1", "type": "string"},
-                                    "item2": {"value": "value2", "type": "string"},
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
+            "version": 4,
+            "outputs": {
+                "item1": {"value": "value1", "type": "string"},
+                "item2": {"value": "value2", "type": "string"},
+            },
+            "resources": [],
         }
         mock_backend.get_state.return_value = state_data
 
@@ -122,11 +99,13 @@ class TestGetStateItem:
             )
         assert "does not support get_state" in str(e.value)
 
-    def test_get_state_item_state_not_found(self):
-        """Test error when remote state resource not found"""
+    def test_get_state_item_no_outputs(self):
+        """Test error when state has no outputs"""
         mock_backend = mock.Mock()
         mock_backend.get_state.return_value = {
-            "values": {"root_module": {"resources": []}}  # Empty resources
+            "version": 4,
+            "outputs": {},  # Empty outputs
+            "resources": [],
         }
 
         with pytest.raises(HookError) as e:
@@ -134,27 +113,19 @@ class TestGetStateItem:
                 "working_dir",
                 {},
                 "terraform_bin",
-                "missing_state",
+                "test_state",
                 "item",
                 mock_backend,
             )
-        assert "Remote state resource 'missing_state' not found" in str(e.value)
+        assert "No outputs found in state 'test_state'" in str(e.value)
 
     def test_get_state_item_output_not_found(self):
         """Test error when output item not found in state"""
         mock_backend = mock.Mock()
         mock_backend.get_state.return_value = {
-            "values": {
-                "root_module": {
-                    "resources": [
-                        {
-                            "type": "terraform_remote_state",
-                            "name": "test_state",
-                            "values": {"outputs": {}},  # No outputs
-                        }
-                    ]
-                }
-            }
+            "version": 4,
+            "outputs": {"some_other_item": {"value": "test", "type": "string"}},
+            "resources": [],
         }
 
         with pytest.raises(HookError) as e:
@@ -166,7 +137,7 @@ class TestGetStateItem:
                 "missing_item",
                 mock_backend,
             )
-        assert "Output 'missing_item' not found" in str(e.value)
+        assert "Output 'missing_item' not found in state 'test_state'" in str(e.value)
 
 
 # Test for `_parse_tfvars_file`
