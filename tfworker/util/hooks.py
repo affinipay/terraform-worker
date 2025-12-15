@@ -14,10 +14,7 @@ import hcl2
 from lark.exceptions import UnexpectedToken
 
 import tfworker.util.log as log
-from tfworker.constants import (
-    WORKER_LOCALS_FILENAME,
-    WORKER_TFVARS_FILENAME,
-)
+from tfworker.constants import WORKER_LOCALS_FILENAME, WORKER_TFVARS_FILENAME
 from tfworker.custom_types.terraform import TerraformAction, TerraformStage
 from tfworker.exceptions import HookError
 from tfworker.util.system import pipe_exec
@@ -122,9 +119,7 @@ def get_state_item(
             raise HookError(f"Invalid state data for {state}")
 
         resources = (
-            state_data.get("values", {})
-            .get("root_module", {})
-            .get("resources", [])
+            state_data.get("values", {}).get("root_module", {}).get("resources", [])
         )
 
         remote_state_resource = None
@@ -137,15 +132,11 @@ def get_state_item(
                 break
 
         if not remote_state_resource:
-            raise HookError(
-                f"Remote state resource '{state}' not found in state data"
-            )
+            raise HookError(f"Remote state resource '{state}' not found in state data")
 
         outputs = remote_state_resource.get("values", {}).get("outputs", {})
         if item not in outputs:
-            raise HookError(
-                f"Output '{item}' not found in remote state '{state}'"
-            )
+            raise HookError(f"Output '{item}' not found in remote state '{state}'")
 
         output_value = outputs[item]
 
@@ -159,9 +150,7 @@ def get_state_item(
             "Cannot retrieve remote state variables."
         )
     except Exception as e:
-        raise HookError(
-            f"Error retrieving state item {state}.{item}: {str(e)}"
-        )
+        raise HookError(f"Error retrieving state item {state}.{item}: {str(e)}")
 
 
 def check_hooks(
@@ -336,9 +325,7 @@ def _populate_environment_with_terraform_variables(
 
     # Set each variable in the environment
     for key, value in terraform_vars.items():
-        _set_hook_env_var(
-            local_env, TFHookVarType.VAR, key, value, b64_encode
-        )
+        _set_hook_env_var(local_env, TFHookVarType.VAR, key, value, b64_encode)
 
 
 def _populate_environment_with_terraform_remote_vars(
@@ -380,7 +367,13 @@ def _populate_environment_with_terraform_remote_vars(
             state = m.group("state")
             state_item = m.group("state_item")
             state_value_json = get_state_item(
-                working_dir, local_env, terraform_path, state, state_item, backend, state_cache
+                working_dir,
+                local_env,
+                terraform_path,
+                state,
+                state_item,
+                backend,
+                state_cache,
             )
 
             # Parse the Terraform output JSON to extract just the value field
@@ -525,5 +518,3 @@ def _execute_hook_script(
         raise HookError(
             f"Hook script {hook_script} execution failed with exit code {exit_code}"
         )
-
-
