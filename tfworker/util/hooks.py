@@ -106,10 +106,6 @@ def get_state_item(
             log.debug(f"Fetching state {state} from backend")
             state_data = backend.get_state(state)
 
-            # Cache it if caching is enabled
-            if state_cache is not None:
-                state_cache[state] = state_data
-
         # Extract the output from the state file's top-level outputs section
         # State file format from backend.get_state() is:
         # {
@@ -124,6 +120,10 @@ def get_state_item(
 
         if not isinstance(state_data, dict):
             raise HookError(f"Invalid state data for {state}")
+
+        # Cache the validated state data (only if we fetched it and it's valid)
+        if state_cache is not None and state not in state_cache:
+            state_cache[state] = state_data
 
         # Get the top-level outputs section
         outputs = state_data.get("outputs", {})
