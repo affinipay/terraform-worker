@@ -61,6 +61,49 @@ class TFHookVarType(Enum):
         return self.value.upper()
 
 
+def _get_or_fetch_state(
+    state: str,
+    backend: "BaseBackend",
+    state_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Get state data from cache or fetch from backend.
+
+    Checks the cache first to avoid redundant backend calls. If the state
+    is not cached, fetches it from the backend, validates it, and caches
+    it for future use.
+
+    Args:
+        state: The state name to get.
+        backend: The backend instance to fetch from.
+        state_cache: Optional cache dict to store fetched state data.
+
+    Returns:
+        The state data as a dict.
+
+    Raises:
+        HookError: If the state data is invalid (not a dict).
+    """
+    # Check cache first to avoid multiple backend calls for the same state
+    if state_cache is not None and state in state_cache:
+        log.debug(f"Using cached state data for {state}")
+        return state_cache[state]
+
+    # Fetch from backend
+    log.debug(f"Fetching state {state} from backend")
+    state_data = backend.get_state(state)
+
+    # Validate the state data before caching
+    if not isinstance(state_data, dict):
+        raise HookError(f"Invalid state data for {state}")
+
+    # Cache the validated state data
+    if state_cache is not None:
+        state_cache[state] = state_data
+
+    return state_data
+
+
 def get_state_item(
     working_dir: str,
     env: Dict[str, str],
@@ -97,14 +140,8 @@ def get_state_item(
         NotImplementedError: If the backend doesn't support get_state().
     """
     try:
-        # Check cache first to avoid multiple backend calls for the same state
-        if state_cache is not None and state in state_cache:
-            state_data = state_cache[state]
-            log.debug(f"Using cached state data for {state}")
-        else:
-            # Get the full state from the backend
-            log.debug(f"Fetching state {state} from backend")
-            state_data = backend.get_state(state)
+        # Get state data (from cache or backend)
+        state_data = _get_or_fetch_state(state, backend, state_cache)
 
         # Extract the output from the state file's top-level outputs section
         # State file format from backend.get_state() is:
@@ -118,14 +155,6 @@ def get_state_item(
         #   }
         # }
 
-        if not isinstance(state_data, dict):
-            raise HookError(f"Invalid state data for {state}")
-
-        # Cache the validated state data (only if we fetched it and it's valid)
-        if state_cache is not None and state not in state_cache:
-            state_cache[state] = state_data
-
-        # Get the top-level outputs section
         outputs = state_data.get("outputs", {})
         if not outputs:
             raise HookError(f"No outputs found in state '{state}'")
