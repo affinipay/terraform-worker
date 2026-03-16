@@ -223,18 +223,36 @@ def test_download_modules_failure(mocker, def_prepare, definition):
         def_prepare.download_modules("def1")
 
 
-def test_get_provider_content(def_prepare, mocker, definition):
-    # When no providers are detected, return empty string without calling required_hcl
+def test_get_provider_content_no_detected_providers(def_prepare, mocker):
+    """When module has no required_providers, write all configured providers."""
     mocker.patch.object(Definition, "get_used_providers", return_value=None)
     def_prepare._app_state.providers.required_hcl.return_value = "REQ"
+    assert def_prepare._get_provider_content("def1") == "REQ"
+    def_prepare._app_state.providers.required_hcl.assert_called_once_with(None)
+
+
+def test_get_provider_content_all_providers_already_declared(def_prepare, mocker):
+    """When all configured providers are already in module's required_providers, return empty."""
+    mocker.patch.object(
+        Definition, "get_used_providers", return_value=["aws", "datadog"]
+    )
+    def_prepare._app_state.providers.__iter__ = MagicMock(
+        return_value=iter(["aws", "datadog"])
+    )
     assert def_prepare._get_provider_content("def1") == ""
     def_prepare._app_state.providers.required_hcl.assert_not_called()
 
-    # When providers are detected, return the required HCL for those providers
-    mocker.patch.object(Definition, "get_used_providers", return_value=["p"])
+
+def test_get_provider_content_partial_overlap(def_prepare, mocker):
+    """Only write required_providers entries for configured providers not already declared."""
+    mocker.patch.object(Definition, "get_used_providers", return_value=["aws"])
+    def_prepare._app_state.providers.__iter__ = MagicMock(
+        return_value=iter(["aws", "datadog"])
+    )
     def_prepare._app_state.providers.required_hcl.return_value = "REQ"
     assert def_prepare._get_provider_content("def1") == "REQ"
-    def_prepare._app_state.providers.required_hcl.assert_called_once_with(["p"])
+    # Only datadog should be passed — aws is already declared in the module's files
+    def_prepare._app_state.providers.required_hcl.assert_called_once_with(["datadog"])
 
 
 def test_get_remotes(def_prepare, mocker, definition):
@@ -342,14 +360,15 @@ def test_create_extra_providers_tf_no_providers_after_modules(
 
 
 def test_create_extra_providers_tf_writes_delta(mocker, def_prepare, definition):
-    """Providers found in submodules but not in initial scan get their own file."""
+    """Providers found in submodules get provider blocks but no required_providers stanza.
+
+    Submodule files already declare required_providers for these providers; writing
+    a second declaration in the root module would cause a duplicate provider error.
+    """
     mocker.patch.object(
         Definition, "get_used_providers", return_value=["aws", "datadog"]
     )
     def_prepare._app_state.providers.provider_hcl.return_value = 'provider "datadog" {}'
-    def_prepare._app_state.providers.required_hcl.return_value = (
-        "  required_providers {\n    datadog = {}\n  }\n"
-    )
 
     def_prepare.create_extra_providers_tf("def1", initial_providers=["aws"])
 
@@ -360,12 +379,11 @@ def test_create_extra_providers_tf_writes_delta(mocker, def_prepare, definition)
     assert providers_path.exists()
     content = providers_path.read_text()
     assert 'provider "datadog"' in content
-    assert "required_providers" in content
-    assert "terraform {" in content
-    # Only the delta providers should be passed to collection methods
+    # required_providers must NOT be written — submodule files already declare it
+    assert "required_providers" not in content
+    assert "terraform {" not in content
+    # Only delta providers passed to provider_hcl; required_hcl never called
     def_prepare._app_state.providers.provider_hcl.assert_called_once_with(
         includes=["datadog"]
     )
-    def_prepare._app_state.providers.required_hcl.assert_called_once_with(
-        includes=["datadog"]
-    )
+    def_prepare._app_state.providers.required_hcl.assert_not_called()

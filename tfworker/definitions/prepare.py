@@ -203,29 +203,43 @@ class DefinitionPrepare:
             )
 
     def _write_extra_providers_tf(self, name: str, extra_providers: List[str]) -> None:
-        """Write worker_generated_providers.tf containing only the delta providers."""
+        """Write worker_generated_providers.tf containing only the delta provider blocks.
+
+        These providers were declared in submodule required_providers blocks, so they
+        are already declared for Terraform's dependency resolution.  Writing a second
+        required_providers entry for them in the root module would cause a duplicate
+        provider error.  Only the provider {} configuration blocks are needed here so
+        that credentials and other settings are available to the downloaded modules.
+        """
         definition = self._app_state.definitions[name]
         with open(
             f"{definition.get_target_path(self._app_state.working_dir)}/{WORKER_PROVIDERS_FILENAME}",
             "w+",
         ) as tffile:
             tffile.write(
-                f"{self._app_state.providers.provider_hcl(includes=extra_providers)}\n\n"
+                f"{self._app_state.providers.provider_hcl(includes=extra_providers)}\n"
             )
-            tffile.write("terraform {\n")
-            tffile.write(
-                self._app_state.providers.required_hcl(includes=extra_providers)
-            )
-            tffile.write("}\n")
 
     def _get_provider_content(self, name: str) -> str:
-        """Get the provider content"""
-        definition = self._app_state.definitions[name]
-        provider_names = definition.get_used_providers(self._app_state.working_dir)
+        """Get the required_providers block content for the terraform stanza.
 
-        if provider_names is None:
+        Only includes providers that are configured in the ProvidersCollection but
+        NOT already declared in the definition's own .tf files.  Writing a provider
+        that the module already declares would produce a duplicate required_provider
+        error in Terraform.
+        """
+        definition = self._app_state.definitions[name]
+        detected = definition.get_used_providers(self._app_state.working_dir)
+
+        if detected is None:
+            # Module has no required_providers declarations; write all configured
+            return self._app_state.providers.required_hcl(None)
+
+        # Exclude providers the module's own files already declare
+        to_write = [p for p in self._app_state.providers if p not in detected]
+        if not to_write:
             return ""
-        return self._app_state.providers.required_hcl(provider_names)
+        return self._app_state.providers.required_hcl(to_write)
 
     def _get_remotes(self, name: str) -> list:
         """Get the remote data sources"""
