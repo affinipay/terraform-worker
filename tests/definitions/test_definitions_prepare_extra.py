@@ -10,6 +10,7 @@ from tfworker.constants import (
     RESERVED_FILES,
     TF_PROVIDER_DEFAULT_LOCKFILE,
     WORKER_LOCALS_FILENAME,
+    WORKER_PROVIDERS_FILENAME,
     WORKER_TF_FILENAME,
     WORKER_TFVARS_FILENAME,
 )
@@ -223,13 +224,17 @@ def test_download_modules_failure(mocker, def_prepare, definition):
 
 
 def test_get_provider_content(def_prepare, mocker, definition):
+    # When no providers are detected, return empty string without calling required_hcl
     mocker.patch.object(Definition, "get_used_providers", return_value=None)
     def_prepare._app_state.providers.required_hcl.return_value = "REQ"
-    assert def_prepare._get_provider_content("def1") == "REQ"
-    def_prepare._app_state.providers.required_hcl.assert_called_once_with(None)
-
-    mocker.patch.object(Definition, "get_used_providers", return_value=["p"])
     assert def_prepare._get_provider_content("def1") == ""
+    def_prepare._app_state.providers.required_hcl.assert_not_called()
+
+    # When providers are detected, return the required HCL for those providers
+    mocker.patch.object(Definition, "get_used_providers", return_value=["p"])
+    def_prepare._app_state.providers.required_hcl.return_value = "REQ"
+    assert def_prepare._get_provider_content("def1") == "REQ"
+    def_prepare._app_state.providers.required_hcl.assert_called_once_with(["p"])
 
 
 def test_get_remotes(def_prepare, mocker, definition):
@@ -292,3 +297,75 @@ def test_get_template_vars(mocker, def_prepare, definition, monkeypatch):
     assert result["var"]["foo"] == "bar"
     assert result["var"]["baz"] == "qux"
     assert result["env"]["EXAMPLE"] == "value"
+
+
+def test_create_worker_tf_returns_initial_providers(mocker, def_prepare):
+    mocker.patch.object(def_prepare, "_get_remotes", return_value=[])
+    mocker.patch.object(def_prepare, "_get_provider_content", return_value="")
+    mocker.patch.object(def_prepare, "_write_worker_tf")
+    mocker.patch.object(Definition, "get_used_providers", return_value=["aws"])
+    result = def_prepare.create_worker_tf("def1")
+    assert result == ["aws"]
+
+
+def test_create_worker_tf_returns_empty_list_when_no_providers(mocker, def_prepare):
+    mocker.patch.object(def_prepare, "_get_remotes", return_value=[])
+    mocker.patch.object(def_prepare, "_get_provider_content", return_value="")
+    mocker.patch.object(def_prepare, "_write_worker_tf")
+    mocker.patch.object(Definition, "get_used_providers", return_value=None)
+    result = def_prepare.create_worker_tf("def1")
+    assert result == []
+
+
+def test_create_extra_providers_tf_no_delta(mocker, def_prepare, definition):
+    """When no new providers are found after downloading modules, no file is written."""
+    mocker.patch.object(Definition, "get_used_providers", return_value=["aws"])
+    def_prepare.create_extra_providers_tf("def1", initial_providers=["aws"])
+    providers_path = (
+        Path(definition.get_target_path(def_prepare._app_state.working_dir))
+        / WORKER_PROVIDERS_FILENAME
+    )
+    assert not providers_path.exists()
+
+
+def test_create_extra_providers_tf_no_providers_after_modules(
+    mocker, def_prepare, definition
+):
+    """When full scan returns None (no required_providers anywhere), no file is written."""
+    mocker.patch.object(Definition, "get_used_providers", return_value=None)
+    def_prepare.create_extra_providers_tf("def1", initial_providers=["aws"])
+    providers_path = (
+        Path(definition.get_target_path(def_prepare._app_state.working_dir))
+        / WORKER_PROVIDERS_FILENAME
+    )
+    assert not providers_path.exists()
+
+
+def test_create_extra_providers_tf_writes_delta(mocker, def_prepare, definition):
+    """Providers found in submodules but not in initial scan get their own file."""
+    mocker.patch.object(
+        Definition, "get_used_providers", return_value=["aws", "datadog"]
+    )
+    def_prepare._app_state.providers.provider_hcl.return_value = 'provider "datadog" {}'
+    def_prepare._app_state.providers.required_hcl.return_value = (
+        "  required_providers {\n    datadog = {}\n  }\n"
+    )
+
+    def_prepare.create_extra_providers_tf("def1", initial_providers=["aws"])
+
+    providers_path = (
+        Path(definition.get_target_path(def_prepare._app_state.working_dir))
+        / WORKER_PROVIDERS_FILENAME
+    )
+    assert providers_path.exists()
+    content = providers_path.read_text()
+    assert 'provider "datadog"' in content
+    assert "required_providers" in content
+    assert "terraform {" in content
+    # Only the delta providers should be passed to collection methods
+    def_prepare._app_state.providers.provider_hcl.assert_called_once_with(
+        includes=["datadog"]
+    )
+    def_prepare._app_state.providers.required_hcl.assert_called_once_with(
+        includes=["datadog"]
+    )
