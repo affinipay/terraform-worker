@@ -1,4 +1,6 @@
+import json
 import re
+from datetime import UTC, datetime
 from enum import Enum
 from functools import partial
 from typing import Any, Dict, List, Union
@@ -16,7 +18,31 @@ class LogLevel(Enum):
     ERROR = 4
 
 
+class LogFormat(Enum):
+    TEXT = "text"
+    JSON = "json"
+
+
 log_level = LogLevel.ERROR
+log_format = LogFormat.TEXT
+
+
+def _normalize_message(msg: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    if isinstance(msg, dict):
+        return dict(msg)
+    return {"message": str(msg)}
+
+
+def _format_json_message(
+    msg: Union[str, Dict[str, Any]], level: LogLevel
+) -> str:
+    payload = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "level": level.name,
+    }
+    payload.update(_normalize_message(msg))
+    payload.setdefault("message", "")
+    return json.dumps(payload, sort_keys=True)
 
 
 def log(
@@ -42,7 +68,12 @@ def log(
         msg = redact_items_token(msg)
 
     if level.value >= log_level.value:
-        secho(msg, fg=level_colors[level])
+        rendered_msg = msg
+        color = level_colors[level]
+        if log_format == LogFormat.JSON:
+            rendered_msg = _format_json_message(msg, level)
+            color = None
+        secho(rendered_msg, fg=color)
     return
 
 
