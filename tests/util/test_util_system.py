@@ -108,6 +108,26 @@ class TestUtilSystem:
         )
         printer.assert_not_called()
 
+    def test_pipe_exec_json_mode_does_not_emit_live_lines(self, mocker):
+        old_format = log.log_format
+        log.log_format = log.LogFormat.JSON
+        log_call = mocker.patch("tfworker.util.system.log.log")
+        printer = mocker.patch("builtins.print")
+
+        exit_code, stdout, stderr = pipe_exec(
+            "/bin/echo foo",
+            stream_output=True,
+            stream_log_level=log.LogLevel.INFO,
+            stream_log_context={"source": "subprocess", "command": "echo"},
+        )
+
+        assert exit_code == 0
+        assert stdout.rstrip() == b"foo"
+        assert stderr == b""
+        log_call.assert_not_called()
+        printer.assert_not_called()
+        log.log_format = old_format
+
     @pytest.mark.parametrize(
         "opsys, machine, mock_platform_opsys, mock_platform_machine",
         [

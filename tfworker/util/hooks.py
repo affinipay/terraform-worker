@@ -537,12 +537,15 @@ def _execute_hook_script(
     log.trace(
         f"Executing hook script: {hook_script} in {hook_dir} with params {phase} {command} "
     )
+    aggregate_output = log.json_logging_enabled()
+    effective_stream_output = stream_output and not aggregate_output
+
     pipe_exec_kwargs = {
         "cwd": hook_dir,
         "env": local_env,
-        "stream_output": stream_output,
+        "stream_output": effective_stream_output,
     }
-    if stream_output:
+    if effective_stream_output:
         pipe_exec_kwargs["stream_log_level"] = log.LogLevel.DEBUG
         pipe_exec_kwargs["stream_log_context"] = {
             "source": "subprocess",
@@ -558,10 +561,24 @@ def _execute_hook_script(
         **pipe_exec_kwargs,
     )
 
+    if aggregate_output:
+        log.log_subprocess_result(
+            command="hook",
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            level=log.LogLevel.ERROR if exit_code else log.LogLevel.DEBUG,
+            extra={
+                "hook_script": hook_script,
+                "hook_phase": phase.value if hasattr(phase, "value") else str(phase),
+                "hook_action": command.value if hasattr(command, "value") else str(command),
+            },
+        )
+
     if debug:
         log.debug(f"Results from hook script: {hook_script}")
         log.debug(f"exit code: {exit_code}")
-        if not stream_output:
+        if not effective_stream_output and not aggregate_output:
             for line in stdout.decode().splitlines():
                 log.debug(f"stdout: {line}")
             for line in stderr.decode().splitlines():

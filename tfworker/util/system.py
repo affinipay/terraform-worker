@@ -121,6 +121,9 @@ def pipe_exec(
         # last command will trigger all of the commands, communicating through their pipes
         for line in iter(commands[-1].stdout.readline, ""):
             rendered_line = line.rstrip()
+            if log.json_logging_enabled():
+                stdout += line
+                continue
             if stream_log_level is not None or stream_log_context is not None:
                 if stream_log_context is None:
                     log.log(rendered_line, level=stream_log_level or log.LogLevel.INFO)

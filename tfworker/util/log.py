@@ -27,6 +27,32 @@ log_level = LogLevel.ERROR
 log_format = LogFormat.TEXT
 
 
+def json_logging_enabled() -> bool:
+    return log_format == LogFormat.JSON
+
+
+def log_subprocess_result(
+    command: str,
+    exit_code: int,
+    stdout: Union[str, bytes],
+    stderr: Union[str, bytes],
+    level: LogLevel = LogLevel.INFO,
+    extra: Dict[str, Any] | None = None,
+    redact: bool = False,
+) -> None:
+    payload: Dict[str, Any] = {
+        "message": "subprocess completed",
+        "source": "subprocess",
+        "command": command,
+        "exit_code": exit_code,
+        "stdout": stdout.decode() if isinstance(stdout, bytes) else stdout,
+        "stderr": stderr.decode() if isinstance(stderr, bytes) else stderr,
+    }
+    if extra is not None:
+        payload.update(extra)
+    log(payload, level=level, redact=redact)
+
+
 def _normalize_message(msg: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     if isinstance(msg, dict):
         return dict(msg)

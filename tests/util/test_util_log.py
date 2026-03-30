@@ -369,6 +369,32 @@ def test_log_json_format_dict(mock_secho):
     assert kwargs == {"fg": None}
 
 
+@patch("tfworker.util.log.secho")
+def test_log_subprocess_result_json(mock_secho):
+    log.log_level = log.LogLevel.INFO
+    log.log_format = log.LogFormat.JSON
+
+    log.log_subprocess_result(
+        command="terraform init",
+        exit_code=0,
+        stdout=b"stdout text",
+        stderr=b"",
+        level=log.LogLevel.INFO,
+        extra={"definition": "example"},
+    )
+
+    mock_secho.assert_called_once()
+    args, kwargs = mock_secho.call_args
+    payload = json.loads(args[0])
+    assert payload["message"] == "subprocess completed"
+    assert payload["command"] == "terraform init"
+    assert payload["definition"] == "example"
+    assert payload["stdout"] == "stdout text"
+    assert payload["stderr"] == ""
+    assert payload["exit_code"] == 0
+    assert kwargs == {"fg": None}
+
+
 # performance testing the two different redact methods
 @pytest.mark.performance
 def test_redact_items_regex_performance():
