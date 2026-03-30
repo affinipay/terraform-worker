@@ -152,11 +152,23 @@ class DefinitionPrepare:
 
         definition = self._app_state.definitions[name]
         log.trace(f"downloading modules for definition {name}")
+        pipe_exec_kwargs = {
+            "cwd": definition.get_target_path(self._app_state.working_dir),
+            "stream_output": stream_output,
+        }
+        if stream_output:
+            pipe_exec_kwargs["stream_log_level"] = log.LogLevel.INFO
+            pipe_exec_kwargs["stream_log_context"] = {
+                "source": "subprocess",
+                "stream": "combined",
+                "command": "terraform get",
+                "definition": name,
+            }
+
         result: TerraformResult = TerraformResult(
             *pipe_exec(
                 "terraform get",
-                cwd=definition.get_target_path(self._app_state.working_dir),
-                stream_output=stream_output,
+                **pipe_exec_kwargs,
             )
         )
         if not stream_output:

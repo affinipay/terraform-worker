@@ -569,12 +569,25 @@ class TerraformCommand(BaseCommand):
             )
             stream_output = False
 
+        pipe_exec_kwargs = {
+            "cwd": working_dir,
+            "env": self.terraform_config.env,
+            "stream_output": stream_output,
+        }
+        if stream_output:
+            pipe_exec_kwargs["stream_log_level"] = log.LogLevel.INFO
+            pipe_exec_kwargs["stream_log_context"] = {
+                "source": "subprocess",
+                "stream": "combined",
+                "command": f"terraform {terraform_command}",
+                "definition": definition_name,
+                "terraform_action": action.value,
+            }
+
         result: TerraformResult = TerraformResult(
             *pipe_exec(
                 f"{self.app_state.terraform_options.terraform_bin} {terraform_command} {params}",
-                cwd=working_dir,
-                env=self.terraform_config.env,
-                stream_output=stream_output,
+                **pipe_exec_kwargs,
             )
         )
 

@@ -90,6 +90,13 @@ def mirror_providers(
                 f"{terraform_bin} providers mirror {cache_dir}",
                 cwd=temp_dir,
                 stream_output=True,
+                stream_log_level=log.LogLevel.INFO,
+                stream_log_context={
+                    "source": "subprocess",
+                    "stream": "combined",
+                    "command": "terraform providers mirror",
+                    "cache_dir": cache_dir,
+                },
             )
             if return_code != 0:
                 raise TFWorkerException(f"Unable to mirror providers: {stderr}")
