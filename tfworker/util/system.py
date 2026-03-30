@@ -125,12 +125,7 @@ def pipe_exec(
                 stdout += line
                 continue
             if stream_log_level is not None or stream_log_context is not None:
-                if stream_log_context is None:
-                    log.log(rendered_line, level=stream_log_level or log.LogLevel.INFO)
-                else:
-                    payload = {"message": rendered_line}
-                    payload.update(stream_log_context)
-                    log.log(payload, level=stream_log_level or log.LogLevel.INFO)
+                log.log(rendered_line, level=stream_log_level or log.LogLevel.INFO)
             else:
                 print(rendered_line)
             stdout += line

@@ -102,10 +102,7 @@ class TestUtilSystem:
         assert exit_code == 0
         assert stdout.rstrip() == b"foo"
         assert stderr == b""
-        log_call.assert_called_once_with(
-            {"message": "foo", "source": "subprocess", "command": "echo"},
-            level=log.LogLevel.INFO,
-        )
+        log_call.assert_called_once_with("foo", level=log.LogLevel.INFO)
         printer.assert_not_called()
 
     def test_pipe_exec_json_mode_does_not_emit_live_lines(self, mocker):
