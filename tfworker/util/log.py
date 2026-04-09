@@ -124,6 +124,10 @@ def redact_items_token(
         ValueError: If passed an item that is not a dictionary or string
     """
 
+    # Convert non-string, non-dict items to strings
+    if not isinstance(items, (str, dict)):
+        items = str(items)
+
     if isinstance(items, str):
         """
         Redacting items from a string is a bit more complex, since the items
@@ -183,9 +187,6 @@ def redact_items_token(
                 items[k] = redact_items_token(v, redact)
         return items
 
-    else:
-        raise ValueError("Items must be a dictionary or a string")
-
 
 def redact_items_re(
     items: Union[Dict[str, Any], str], redact: List[str] = REDACTED_ITEMS
@@ -203,6 +204,10 @@ def redact_items_re(
     Raises:
         ValueError: If passed an item that is not a dictionary or string
     """
+    # Convert non-string, non-dict items to strings
+    if not isinstance(items, (str, dict)):
+        items = str(items)
+
     if isinstance(items, str):
         # The regex pattern is designed to match and redact sensitive information from a string, preserving the original key, delimiter, and quote style.
         #
@@ -237,9 +242,6 @@ def redact_items_re(
             elif isinstance(v, str):
                 items[k] = redact_items_re(v, redact)
         return items
-
-    else:
-        raise ValueError("Items must be a dictionary or a string")
 
 
 # Allow a non stuttering method when importing the library to print

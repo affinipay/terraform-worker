@@ -575,14 +575,19 @@ def _execute_hook_script(
             },
         )
 
-    if debug:
-        log.debug(f"Results from hook script: {hook_script}")
-        log.debug(f"exit code: {exit_code}")
+    # Log hook results based on exit code and debug mode
+    # Always log failures at ERROR level, only log success at DEBUG level when debug=True
+    should_log = debug or (exit_code != 0)
+    log_level_func = log.error if exit_code != 0 else log.debug
+
+    if should_log:
+        log_level_func(f"Results from hook script: {hook_script}")
+        log_level_func(f"exit code: {exit_code}")
         if not effective_stream_output and not aggregate_output:
             for line in stdout.decode().splitlines():
-                log.debug(f"stdout: {line}")
+                log_level_func(f"stdout: {line}")
             for line in stderr.decode().splitlines():
-                log.debug(f"stderr: {line}")
+                log_level_func(f"stderr: {line}")
 
     if exit_code != 0:
         raise HookError(

@@ -41,8 +41,13 @@ def test_redact_items_re_dict():
 
 
 def test_redact_items_re_invalid_type():
-    with pytest.raises(ValueError, match="Items must be a dictionary or a string"):
-        log.redact_items_re(12345)
+    # Non-string/dict values should be converted to strings
+    result = log.redact_items_re(12345)
+    assert result == "12345"
+
+    # Test with a list
+    result = log.redact_items_re([1, 2, 3])
+    assert result == "[1, 2, 3]"
 
 
 def test_redact_items_re_nested_dict():
@@ -158,8 +163,13 @@ def test_redact_items_token_dict():
 
 
 def test_redact_items_token_invalid_type():
-    with pytest.raises(ValueError, match="Items must be a dictionary or a string"):
-        log.redact_items_token(12345)
+    # Non-string/dict values should be converted to strings
+    result = log.redact_items_token(12345)
+    assert result == "12345"
+
+    # Test with a list
+    result = log.redact_items_token([1, 2, 3])
+    assert result == "[1, 2, 3]"
 
 
 def test_redact_items_token_nested_dict():
