@@ -1,7 +1,5 @@
 import json
 import re
-import sys
-import traceback
 from datetime import UTC, datetime
 from enum import Enum
 from functools import partial
@@ -61,9 +59,7 @@ def _normalize_message(msg: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     return {"message": str(msg)}
 
 
-def _format_json_message(
-    msg: Union[str, Dict[str, Any]], level: LogLevel
-) -> str:
+def _format_json_message(msg: Union[str, Dict[str, Any]], level: LogLevel) -> str:
     payload = {
         "timestamp": datetime.now(UTC).isoformat(),
         "level": level.name,

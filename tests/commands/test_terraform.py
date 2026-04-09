@@ -221,9 +221,12 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         pe = mocker.patch(
-            "tfworker.commands.terraform.pipe_exec", return_value=(0, b"stdout", b"stderr")
+            "tfworker.commands.terraform.pipe_exec",
+            return_value=(0, b"stdout", b"stderr"),
         )
-        aggregate = mocker.patch("tfworker.commands.terraform.log.log_subprocess_result")
+        aggregate = mocker.patch(
+            "tfworker.commands.terraform.log.log_subprocess_result"
+        )
 
         cmd._run("def", TerraformAction.APPLY)
 
@@ -251,9 +254,12 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         mocker.patch(
-            "tfworker.commands.terraform.pipe_exec", return_value=(2, b"stdout", b"stderr")
+            "tfworker.commands.terraform.pipe_exec",
+            return_value=(2, b"stdout", b"stderr"),
         )
-        aggregate = mocker.patch("tfworker.commands.terraform.log.log_subprocess_result")
+        aggregate = mocker.patch(
+            "tfworker.commands.terraform.log.log_subprocess_result"
+        )
 
         cmd._run("def", TerraformAction.PLAN)
 
@@ -280,9 +286,12 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         mocker.patch(
-            "tfworker.commands.terraform.pipe_exec", return_value=(1, b"stdout", b"stderr")
+            "tfworker.commands.terraform.pipe_exec",
+            return_value=(1, b"stdout", b"stderr"),
         )
-        aggregate = mocker.patch("tfworker.commands.terraform.log.log_subprocess_result")
+        aggregate = mocker.patch(
+            "tfworker.commands.terraform.log.log_subprocess_result"
+        )
 
         cmd._run("def", TerraformAction.PLAN)
 
@@ -309,9 +318,12 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         mocker.patch(
-            "tfworker.commands.terraform.pipe_exec", return_value=(2, b"stdout", b"stderr")
+            "tfworker.commands.terraform.pipe_exec",
+            return_value=(2, b"stdout", b"stderr"),
         )
-        aggregate = mocker.patch("tfworker.commands.terraform.log.log_subprocess_result")
+        aggregate = mocker.patch(
+            "tfworker.commands.terraform.log.log_subprocess_result"
+        )
 
         cmd._run("def", TerraformAction.APPLY)
 
