@@ -598,7 +598,14 @@ class TerraformCommand(BaseCommand):
         )
 
         if aggregate_output:
-            log_level = log.LogLevel.ERROR if result.exit_code else log.LogLevel.INFO
+            # For terraform plan, exit code 2 means changes detected (not an error)
+            # For other commands, any non-zero exit code is an error
+            if action == TerraformAction.PLAN and result.exit_code == 2:
+                log_level = log.LogLevel.INFO
+            elif result.exit_code != 0:
+                log_level = log.LogLevel.ERROR
+            else:
+                log_level = log.LogLevel.INFO
             log.log_subprocess_result(
                 command=f"terraform {terraform_command}",
                 exit_code=result.exit_code,
