@@ -617,6 +617,7 @@ class TerraformCommand(BaseCommand):
                     "terraform_action": action.value,
                 },
                 message=f"terraform {terraform_command} output for {definition_name}",
+                skip_output_redaction=True,
             )
 
         log.debug(f"exit code: {result.exit_code}")

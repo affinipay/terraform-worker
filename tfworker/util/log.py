@@ -40,18 +40,39 @@ def log_subprocess_result(
     extra: Dict[str, Any] | None = None,
     redact: bool = False,
     message: str | None = None,
+    skip_output_redaction: bool = False,
 ) -> None:
+    stdout_str = stdout.decode() if isinstance(stdout, bytes) else stdout
+    stderr_str = stderr.decode() if isinstance(stderr, bytes) else stderr
+
     payload: Dict[str, Any] = {
         "message": message or f"{command} completed",
         "source": "subprocess",
         "command": command,
         "exit_code": exit_code,
-        "stdout": stdout.decode() if isinstance(stdout, bytes) else stdout,
-        "stderr": stderr.decode() if isinstance(stderr, bytes) else stderr,
     }
     if extra is not None:
         payload.update(extra)
-    log(payload, level=level, redact=redact)
+
+    # If skip_output_redaction is True, redact everything except stdout/stderr,
+    # then add stdout/stderr back without redaction to avoid expensive processing
+    # of large terraform outputs
+    if skip_output_redaction:
+        # Redact the metadata fields (command, extra, etc.) but not stdout/stderr
+        if redact:
+            payload = redact_items_re(payload)
+        else:
+            payload = redact_items_token(payload)
+        # Add stdout/stderr back without redaction
+        payload["stdout"] = stdout_str
+        payload["stderr"] = stderr_str
+        # Log without further redaction
+        log(payload, level=level, redact=None)
+    else:
+        # Original behavior: include stdout/stderr in payload before redaction
+        payload["stdout"] = stdout_str
+        payload["stderr"] = stderr_str
+        log(payload, level=level, redact=redact)
 
 
 def _normalize_message(msg: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -80,6 +101,7 @@ def log(
 
     Args:
         msg ()
+        redact: If None, skip redaction entirely. If True, use regex redaction. If False, use token redaction.
     """
     level_colors = {
         log_level.TRACE: "cyan",
@@ -89,7 +111,10 @@ def log(
         log_level.ERROR: "red",
     }
 
-    if redact:
+    # Skip redaction if redact=None (used to avoid expensive processing of large outputs)
+    if redact is None:
+        pass  # No redaction
+    elif redact:
         msg = redact_items_re(msg)
     else:
         msg = redact_items_token(msg)

@@ -242,6 +242,7 @@ class TestTerraformCommandMethods:
                 "terraform_action": "apply",
             },
             message="terraform apply output for def",
+            skip_output_redaction=True,
         )
         log.log_format = old_format
 
@@ -275,6 +276,7 @@ class TestTerraformCommandMethods:
                 "terraform_action": "plan",
             },
             message="terraform plan output for def",
+            skip_output_redaction=True,
         )
         log.log_format = old_format
 
@@ -308,6 +310,7 @@ class TestTerraformCommandMethods:
                 "terraform_action": "plan",
             },
             message="terraform plan output for def",
+            skip_output_redaction=True,
         )
         log.log_format = old_format
 
@@ -341,6 +344,7 @@ class TestTerraformCommandMethods:
                 "terraform_action": "apply",
             },
             message="terraform apply output for def",
+            skip_output_redaction=True,
         )
         log.log_format = old_format
 
