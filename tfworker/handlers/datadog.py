@@ -191,15 +191,16 @@ class DatadogHandler(BaseHandler):
         title = f"Terraform {action.value} of {deployment}/{definition.name}"
         service = definition.name.replace("_", "-")
 
-        category, env = deployment.split("-")
+        category, env = deployment.split("-", 1)
 
         message_lines = [
             f"Terraform {action.value} completed for `{definition.name}` "
             f"in deployment `{deployment}`.",
         ]
 
-        if len(git_info) > 0:
-            message_lines.append("Definition Git:")
+        if any(git_info.values()):
+            message_lines.append("Definition Git Info:")
+            message_lines.append("---------------------")
         if git_info["subject"]:
             message_lines.append(f"Commit: {git_info['subject']}")
         if git_info["short_commit"]:
@@ -275,9 +276,7 @@ class DatadogHandler(BaseHandler):
     def _post_event(self, payload: dict) -> None:
         """POST the change event to the Datadog Events API.
 
-        Honors ``config.required``: when required, any failure raises a
-        terminating ``HandlerError``; otherwise failures are logged and the run
-        continues.
+        Logs failures as warn and continues
         """
         headers = {
             "Content-Type": "application/json",
@@ -289,8 +288,9 @@ class DatadogHandler(BaseHandler):
             resp = self._http.request(
                 "POST",
                 self.config.events_url,
-                body=json.dumps(payload).encode("utf-8"),
+                json=payload,
                 headers=headers,
+                timeout=urllib3.Timeout(connect=2.0, read=5.0),
             )
         except Exception as e:
             log.warn(f"Datadog Event failed to post: {e}")
