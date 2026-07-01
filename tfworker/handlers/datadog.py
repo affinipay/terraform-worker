@@ -126,7 +126,7 @@ class DatadogHandler(BaseHandler):
             definition.get_target_path(working_dir)
         )
         payload = self._build_payload(
-            action, definition, deployment, definition_git_info
+            action, definition, deployment, result, definition_git_info
         )
         log.debug(f"Sending change event to Datadog: {json.dumps(payload)}")
         self._post_event(payload)
@@ -183,6 +183,7 @@ class DatadogHandler(BaseHandler):
         action: "TerraformAction",
         definition: "Definition",
         deployment: str,
+        result: "TerraformResult",
         git_info: dict,
     ) -> dict:
         """Build a v2 Events API change-event payload."""
@@ -228,6 +229,9 @@ class DatadogHandler(BaseHandler):
             tags.append(f"git_commit:{git_info['short_commit']}")
 
         is_ci = bool(os.environ.get("CI"))
+        stdout = result.stdout_str
+        stderr = result.stderr_str
+
         change_metadata = {
             k: v
             for k, v in {
@@ -243,6 +247,9 @@ class DatadogHandler(BaseHandler):
                 ),
                 "is_ci": is_ci,
                 "executing_user": os.environ.get("USER"),
+                # Capture and truncate to DD's text limit (4096)
+                "stdout": (stdout[4000:] + '...') if len(stdout) > 4000 else stdout,
+                "stderr": (stderr[4000:] + '...') if len(stderr) > 4000 else stderr
             }.items()
             if v
         }
