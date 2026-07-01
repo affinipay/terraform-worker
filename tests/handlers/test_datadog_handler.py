@@ -1,4 +1,3 @@
-import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -389,7 +388,7 @@ class TestDatadogExecute:
         assert args[1].endswith("/api/v2/events")
         assert kwargs["headers"]["DD-API-KEY"] == "placeholder-api-key"
         assert kwargs["headers"]["DD-APP-KEY"] == "placeholder-app-key"
-        assert json.loads(kwargs["body"].decode()) == {"data": {"x": 1}}
+        assert kwargs["json"] == {"data": {"x": 1}}
 
 
 class TestDatadogPostErrors:

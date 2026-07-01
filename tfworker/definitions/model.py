@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 import tfworker.util.log as log
 
@@ -71,7 +71,11 @@ class Definition(BaseModel):
     ready: bool = False
     needs_apply: bool = False
     plan_failed: bool = False
-    plan_file: Optional[Union[str, None]] = None
+    plan_file: Optional[Union[Path, str, None]] = None
+
+    @field_serializer("plan_file")
+    def serialize_plan_file(self, plan_file: Path | str | None):
+        return str(plan_file)
 
     def get_target_path(self, working_dir: str) -> str:
         """
