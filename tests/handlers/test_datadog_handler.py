@@ -152,6 +152,9 @@ class TestDatadogBuildPayload:
     def _defn(self, name="vpc"):
         return Definition(name=name, path="/tmp")
 
+    def _result(self):
+        return TerraformResult(0, b"ok", b"")
+
     def _git_info(self, **overrides):
         info = {
             "branch": "main",
@@ -171,28 +174,44 @@ class TestDatadogBuildPayload:
     def test_category_is_change(self):
         h = self._make_handler()
         p = h._build_payload(
-            TerraformAction.APPLY, self._defn(), "prod-use1", self._git_info()
+            TerraformAction.APPLY,
+            self._defn(),
+            "prod-use1",
+            self._result(),
+            self._git_info(),
         )
         assert p["data"]["attributes"]["category"] == "change"
 
     def test_type_is_event(self):
         h = self._make_handler()
         p = h._build_payload(
-            TerraformAction.APPLY, self._defn(), "prod-use1", self._git_info()
+            TerraformAction.APPLY,
+            self._defn(),
+            "prod-use1",
+            self._result(),
+            self._git_info(),
         )
         assert p["data"]["type"] == "event"
 
     def test_title_includes_action_deployment_and_definition(self):
         h = self._make_handler()
         p = h._build_payload(
-            TerraformAction.APPLY, self._defn(), "prod-use1", self._git_info()
+            TerraformAction.APPLY,
+            self._defn(),
+            "prod-use1",
+            self._result(),
+            self._git_info(),
         )
         assert p["data"]["attributes"]["title"] == "Terraform apply of prod-use1/vpc"
 
     def test_author_uses_email(self):
         h = self._make_handler()
         p = h._build_payload(
-            TerraformAction.APPLY, self._defn(), "prod-use1", self._git_info()
+            TerraformAction.APPLY,
+            self._defn(),
+            "prod-use1",
+            self._result(),
+            self._git_info(),
         )
         assert self._attrs(p)["author"] == {"type": "user", "name": "jane@x.com"}
 
@@ -202,6 +221,7 @@ class TestDatadogBuildPayload:
             TerraformAction.APPLY,
             self._defn(),
             "prod-use1",
+            self._result(),
             self._git_info(author_email="", author_name="Jane Doe"),
         )
         assert self._attrs(p)["author"]["name"] == "Jane Doe"
@@ -210,6 +230,7 @@ class TestDatadogBuildPayload:
             TerraformAction.APPLY,
             self._defn(),
             "prod-use1",
+            self._result(),
             self._git_info(author_email="", author_name=""),
         )
         assert self._attrs(p2)["author"]["name"] == "unknown"
@@ -217,7 +238,11 @@ class TestDatadogBuildPayload:
     def test_changed_resource_is_configuration_named_after_definition(self):
         h = self._make_handler()
         p = h._build_payload(
-            TerraformAction.APPLY, self._defn(), "prod-use1", self._git_info()
+            TerraformAction.APPLY,
+            self._defn(),
+            "prod-use1",
+            self._result(),
+            self._git_info(),
         )
         cr = self._attrs(p)["changed_resource"]
         assert cr == {"type": "configuration", "name": "vpc"}
@@ -228,6 +253,7 @@ class TestDatadogBuildPayload:
             TerraformAction.APPLY,
             self._defn("my_service"),
             "prod-use1",
+            self._result(),
             self._git_info(),
         )
         impacted = self._attrs(p)["impacted_resources"]
@@ -236,7 +262,11 @@ class TestDatadogBuildPayload:
     def test_tags_include_context(self):
         h = self._make_handler()
         p = h._build_payload(
-            TerraformAction.DESTROY, self._defn(), "prod-use1", self._git_info()
+            TerraformAction.DESTROY,
+            self._defn(),
+            "prod-use1",
+            self._result(),
+            self._git_info(),
         )
         tags = p["data"]["attributes"]["tags"]
         assert "env:use1" in tags
@@ -251,6 +281,7 @@ class TestDatadogBuildPayload:
             TerraformAction.APPLY,
             self._defn(),
             "prod-use1",
+            self._result(),
             self._git_info(branch="", short_commit=""),
         )
         tags = p["data"]["attributes"]["tags"]
@@ -263,6 +294,7 @@ class TestDatadogBuildPayload:
             TerraformAction.APPLY,
             self._defn(),
             "prod-use1",
+            self._result(),
             self._git_info(branch="", subject=""),
         )
         meta = self._attrs(p)["change_metadata"]
@@ -277,7 +309,11 @@ class TestDatadogBuildPayload:
     def test_change_metadata_includes_definition_dump(self):
         h = self._make_handler()
         p = h._build_payload(
-            TerraformAction.APPLY, self._defn(), "prod-use1", self._git_info()
+            TerraformAction.APPLY,
+            self._defn(),
+            "prod-use1",
+            self._result(),
+            self._git_info(),
         )
         meta = self._attrs(p)["change_metadata"]
         assert meta["definition"]["name"] == "vpc"

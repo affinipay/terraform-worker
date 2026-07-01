@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 import tfworker.util.log as log
 from tfworker.custom_types.terraform import TerraformAction, TerraformStage
+from tfworker.util.system import strip_ansi
 
 from .base import BaseHandler
 from .registry import HandlerRegistry
@@ -229,8 +230,8 @@ class DatadogHandler(BaseHandler):
             tags.append(f"git_commit:{git_info['short_commit']}")
 
         is_ci = bool(os.environ.get("CI"))
-        stdout = result.stdout_str
-        stderr = result.stderr_str
+        stdout = strip_ansi(result.stdout_str)
+        stderr = strip_ansi(result.stderr_str)
 
         change_metadata = {
             k: v
@@ -248,8 +249,8 @@ class DatadogHandler(BaseHandler):
                 "is_ci": is_ci,
                 "executing_user": os.environ.get("USER"),
                 # Capture and truncate to DD's text limit (4096)
-                "stdout": (stdout[4000:] + '...') if len(stdout) > 4000 else stdout,
-                "stderr": (stderr[4000:] + '...') if len(stderr) > 4000 else stderr
+                "stdout": (stdout[4000:] + "...") if len(stdout) > 4000 else stdout,
+                "stderr": (stderr[4000:] + "...") if len(stderr) > 4000 else stderr,
             }.items()
             if v
         }
