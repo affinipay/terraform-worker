@@ -83,6 +83,10 @@ class DatadogConfig(BaseModel):
     def events_url(self) -> str:
         return "https://event-management-intake.datadoghq.com/api/v2/events"
 
+    @property
+    def validate_url(self) -> str:
+        return "https://api.datadoghq.com/api/v1/validate"
+
 
 @HandlerRegistry.register("datadog")
 class DatadogHandler(BaseHandler):
@@ -90,7 +94,6 @@ class DatadogHandler(BaseHandler):
 
     actions = [TerraformAction.APPLY, TerraformAction.DESTROY]
     config_model = DatadogConfig
-    _ready = False
     default_priority = {
         TerraformAction.APPLY: 110,
         TerraformAction.DESTROY: 110,
@@ -99,9 +102,55 @@ class DatadogHandler(BaseHandler):
     def __init__(self, config: DatadogConfig) -> None:
         self.config = config
         self._http = urllib3.PoolManager()
-        self._ready = True
+        self._ready: bool | None = None  # None = not yet validated
 
     def is_ready(self) -> bool:
+        """Return True only if the API key validates and Datadog is reachable.
+
+        Validated once and cached (in self._ready); a Datadog problem never
+        aborts a terraform run -- on any failure we warn and report not-ready so
+        the handler is skipped.
+        """
+        if self._ready is not None:
+            return self._ready
+
+        headers = {
+            "Accept": "application/json",
+            "DD-API-KEY": self.config.resolved_api_key,
+        }
+        try:
+            resp = self._http.request(
+                "GET",
+                self.config.validate_url,
+                headers=headers,
+                timeout=urllib3.Timeout(connect=2.0, read=5.0),
+            )
+        except Exception as e:
+            log.warn(f"Datadog credential validation failed, handler disabled: {e}")
+            self._ready = False
+            return self._ready
+
+        if resp.status != 200:
+            body = resp.data.decode("utf-8", errors="replace")
+            log.warn(
+                f"Datadog credential validation returned {resp.status}, "
+                f"handler disabled: {body}"
+            )
+            self._ready = False
+            return self._ready
+
+        # /api/v1/validate returns {"valid": true} on success.
+        try:
+            valid = json.loads(resp.data.decode("utf-8")).get("valid", False)
+        except Exception:
+            valid = False
+        if not valid:
+            log.warn("Datadog reported credentials as invalid, handler disabled")
+            self._ready = False
+            return self._ready
+
+        log.debug("Datadog credentials validated")
+        self._ready = True
         return self._ready
 
     def execute(

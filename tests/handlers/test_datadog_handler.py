@@ -462,6 +462,70 @@ class TestDatadogPostErrors:
         warn.assert_not_called()
 
 
+class TestDatadogIsReady:
+    """is_ready() validates the API key against Datadog once, then caches the
+    result. Any failure warns and reports not-ready so a Datadog problem never
+    aborts a terraform run."""
+
+    def _make_handler(self):
+        from tfworker.handlers.datadog import DatadogConfig, DatadogHandler
+
+        h = DatadogHandler(DatadogConfig(**_RAW_KEYS))
+        h._http = MagicMock()
+        return h
+
+    def test_valid_credentials_ready(self):
+        h = self._make_handler()
+        h._http.request.return_value = MagicMock(status=200, data=b'{"valid": true}')
+        assert h.is_ready() is True
+
+    def test_validate_uses_api_key_header_and_url(self):
+        h = self._make_handler()
+        h._http.request.return_value = MagicMock(status=200, data=b'{"valid": true}')
+        h.is_ready()
+        args, kwargs = h._http.request.call_args
+        assert args[0] == "GET"
+        assert args[1].endswith("/api/v1/validate")
+        assert kwargs["headers"]["DD-API-KEY"] == "placeholder-api-key"
+
+    def test_invalid_flag_not_ready_and_warns(self):
+        h = self._make_handler()
+        h._http.request.return_value = MagicMock(status=200, data=b'{"valid": false}')
+        with patch("tfworker.handlers.datadog.log.warn") as warn:
+            assert h.is_ready() is False
+        warn.assert_called_once()
+
+    def test_non_200_not_ready_and_warns(self):
+        h = self._make_handler()
+        h._http.request.return_value = MagicMock(status=403, data=b"Forbidden")
+        with patch("tfworker.handlers.datadog.log.warn") as warn:
+            assert h.is_ready() is False
+        warn.assert_called_once()
+        assert "403" in warn.call_args.args[0]
+
+    def test_request_exception_not_ready_and_warns(self):
+        h = self._make_handler()
+        h._http.request.side_effect = Exception("network down")
+        with patch("tfworker.handlers.datadog.log.warn") as warn:
+            assert h.is_ready() is False
+        warn.assert_called_once()
+        assert "network down" in warn.call_args.args[0]
+
+    def test_success_result_is_cached(self):
+        h = self._make_handler()
+        h._http.request.return_value = MagicMock(status=200, data=b'{"valid": true}')
+        assert h.is_ready() is True
+        assert h.is_ready() is True
+        h._http.request.assert_called_once()
+
+    def test_failure_result_is_cached(self):
+        h = self._make_handler()
+        h._http.request.return_value = MagicMock(status=403, data=b"Forbidden")
+        assert h.is_ready() is False
+        assert h.is_ready() is False
+        h._http.request.assert_called_once()
+
+
 class TestDatadogRegistry:
     def test_registered_as_datadog(self):
         import tfworker.handlers.datadog  # noqa: F401
