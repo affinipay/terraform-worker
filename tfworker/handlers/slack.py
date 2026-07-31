@@ -1,7 +1,10 @@
 """Slack handler for terraform-worker.
 
-Posts a single live-updating status board message to a Slack channel,
-updating it in-place as definitions progress through terraform actions.
+Posts a compact, live-updating Block Kit report for each run: one channel
+message (a ``container`` header card plus a ``plan`` "Run progress" activity
+feed) and one threaded reply holding the full per-definition ``data_table``.
+The channel message stays a fixed size regardless of how many definitions the
+run contains; the thread table holds the full detail.
 
 Example configuration::
 
@@ -10,16 +13,42 @@ Example configuration::
         channel: "#terraform-runs"
         token: "xoxb-..."          # raw value; supports jinja injection
         # token_env: "SLACK_BOT_TOKEN"  # env var name (default)
-        title: "Prod deployment"   # optional; falls back to deployment name
+        title: "apps/qa"           # optional; falls back to deployment name
+        links:                     # optional links shown in the header card
+          - text: "Argo workflow"
+            url: "https://argo.example/workflows/ops/{{ env.WORKFLOW_NAME }}"
+          - text: "logs"
+            url: "https://app.datadoghq.com/logs?query=service%3Aneptune-executor"
+        # per-definition deep link used on failure cards; {definition} is
+        # replaced with the definition name
+        definition_log_url_template: "https://app.datadoghq.com/logs?query=service%3Aneptune-executor%20%40definition%3A{definition}"
+        update_interval: 4.0       # min seconds between Slack updates
+
+Notes on Slack API behavior this module encodes (all confirmed live):
+
+- ``has_header_divider`` and ``is_collapsible`` on a container are mutually
+  exclusive at post/update time.
+- ``data_table`` cells reject ``raw_number``; numeric columns use ``raw_text``.
+- ``plan`` blocks should get a fresh ``block_id`` on every ``chat.update``.
+- ``blocks.validate`` accepts payloads the message APIs reject; only real
+  ``chat.postMessage``/``chat.update`` calls prove a payload.
+- The bot token only has ``chat:write``/``chat:write.public`` so every posted
+  message ``ts`` is tracked locally (the bot cannot read the thread back).
 """
 
+import copy
 import os
+import re
 import subprocess
-from typing import TYPE_CHECKING, Union
+import threading
+import time
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Optional, Union
 
 import click
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 import tfworker.util.log as log
 from tfworker.custom_types.terraform import TerraformAction, TerraformStage
@@ -31,12 +60,28 @@ if TYPE_CHECKING:
     from tfworker.commands.terraform import TerraformResult
     from tfworker.definitions.model import Definition
 
+TERMINAL_STATUSES = frozenset({"done", "changes", "failed", "skipped"})
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_PLAN_LINE_RE = re.compile(r"Plan: [^\n]*")
+_PLAN_COUNT_RE = re.compile(r"(\d+) to (?:import|add|change|destroy)")
+_APPLY_LINE_RE = re.compile(r"(?:Apply|Destroy) complete! Resources: [^\n]*")
+_APPLY_COUNT_RE = re.compile(r"(\d+) (?:imported|added|changed|destroyed)")
+
+
+class SlackLink(BaseModel):
+    text: str
+    url: str
+
 
 class SlackConfig(BaseModel):
     channel: str
     token: str | None = Field(default=None, repr=False)
     token_env: str = "SLACK_BOT_TOKEN"
     title: str | None = None
+    links: list[SlackLink] = Field(default_factory=list)
+    definition_log_url_template: str | None = None
+    update_interval: float = Field(default=4.0, ge=0.0)
 
     _resolved_token: str = PrivateAttr(default="")
 
@@ -59,95 +104,206 @@ class SlackConfig(BaseModel):
         return self._resolved_token
 
 
-class SlackStatusBoard:
-    """Internal state machine for the Slack status board message."""
+def _rich_text(elements: list[dict]) -> dict:
+    return {
+        "type": "rich_text",
+        "elements": [{"type": "rich_text_section", "elements": elements}],
+    }
 
-    STATUS_EMOJI: dict[str, str] = {
-        "pending": "⏳",
-        "running": "🔄",
-        "done": "✅",
-        "changes": "🔵",
-        "failed": "❌",
-        "skipped": "—",
+
+def _truncate(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+class DefinitionRecord:
+    """Per-definition state accumulated over a run."""
+
+    __slots__ = (
+        "name",
+        "statuses",
+        "started_at",
+        "finished_at",
+        "plan_line",
+        "planned_changes",
+        "applied_changes",
+        "error_action",
+        "error_snippet",
+    )
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.statuses: dict[str, str] = {}
+        self.started_at: float | None = None
+        self.finished_at: float | None = None
+        self.plan_line: str | None = None
+        self.planned_changes: int | None = None
+        self.applied_changes: int | None = None
+        self.error_action: str | None = None
+        self.error_snippet: str | None = None
+
+    def duration_secs(self) -> int | None:
+        if self.started_at is None or self.finished_at is None:
+            return None
+        return int(self.finished_at - self.started_at)
+
+
+class SlackStatusBoard:
+    """Builds and maintains the run's Slack messages.
+
+    One channel message (container + plan block) is posted at setup and
+    updated in place; the per-definition table is posted as threaded
+    ``data_table`` replies. Updates are debounced to ``update_interval``
+    seconds (terminal flushes bypass the debounce) and 429s are honored.
+    """
+
+    # data_table emoji per status; skipped renders as plain "—" text
+    RICH_STATUS_EMOJI: dict[str, str] = {
+        "pending": "hourglass",
+        "running": "arrows_counterclockwise",
+        "done": "white_check_mark",
+        "changes": "large_blue_circle",
+        "failed": "x",
     }
     ACTION_ORDER: list[str] = ["init", "plan", "apply", "destroy"]
-    # Slack allows at most 50 blocks per message; keep detail rows well under it.
-    MAX_BLOCKS: int = 50
-    DETAIL_ROWS_PER_MSG: int = 45
+    ACTION_NOUNS: dict[str, tuple[str, str, str]] = {
+        # action -> (noun, present participle, past tense)
+        "plan": ("Plan", "Planning", "planned"),
+        "apply": ("Apply", "Applying", "applied"),
+        "destroy": ("Destroy", "Destroying", "destroyed"),
+        "init": ("Init", "Initializing", "initialized"),
+    }
+    MAX_ERROR_CARDS: int = 5
+    MAX_NAMED_RUNNING: int = 2
+    MAX_FAILURE_TABLE_ROWS: int = 5
+    MAX_DATA_TABLE_ROWS: int = 200
+    DATA_TABLE_PAGE_SIZE: int = 15
+    FAILURE_ERROR_CHARS: int = 80
+    CARD_ERROR_CHARS: int = 200
 
-    def __init__(self, channel: str, title: str | None, run_id: str | None):
-        self._ts: str | None = None
-        self._channel = channel
-        self._statuses: dict[str, dict[str, str]] = {}
-        self._seen_actions: list[str] = []
-        self._deployment: str | None = None
+    def __init__(
+        self,
+        config: SlackConfig,
+        run_id: str | None,
+        backend_plans: bool = False,
+    ) -> None:
+        self._config = config
+        self._channel = config.channel
         self._run_id = run_id
-        self._title = title
-        self._git_context: str | None = None
-        # Parent (summary) message ts is `_ts`; threaded detail messages are
-        # `_detail_ts`. We cache the last blocks sent for each so repeated
-        # post_or_update calls skip no-op Slack updates.
-        self._detail_ts: list[str] = []
-        self._parent_blocks_sent: Union[list, None] = None
-        self._detail_blocks_sent: list[list] = []
+        self._backend_plans = backend_plans
 
+        self._records: dict[str, DefinitionRecord] = {}
+        self._expected_actions: list[str] = []
+        self._primary_action: str = "plan"
+        self._deployment: str | None = None
+        self._branch: str | None = None
+        self._commit: str | None = None
+
+        self._started_monotonic = time.monotonic()
+        self._started_wall = datetime.now(timezone.utc)
+
+        self._lock = threading.RLock()
+        self._seq = 0
+        self._next_update_at = 0.0
+        self._ts: str | None = None
+        self._thread_ts: list[str] = []
+        self._main_sent: Union[list, None] = None
+        self._thread_sent: list[list] = []
+
+    # ------------------------------------------------------------------
+    # state updates
+    # ------------------------------------------------------------------
     def ensure_definition(
         self, definition_name: str, deployment: str, working_dir: str
     ) -> None:
         """Register a definition and capture run context on first call."""
-        if self._deployment is None:
-            self._deployment = deployment
-            self._git_context = self._resolve_git_context(working_dir)
-        if definition_name not in self._statuses:
-            self._statuses[definition_name] = {}
+        with self._lock:
+            if self._deployment is None:
+                self._deployment = deployment
+                self._resolve_git_context(working_dir)
+            if definition_name not in self._records:
+                self._records[definition_name] = DefinitionRecord(definition_name)
+
+    def set_expected_actions(self, actions: list[TerraformAction]) -> None:
+        """Set the action columns for the run and derive the primary action."""
+        with self._lock:
+            vals = [a.value for a in actions]
+            self._expected_actions = [a for a in self.ACTION_ORDER if a in vals]
+            for candidate in ("destroy", "apply", "plan", "init"):
+                if candidate in self._expected_actions:
+                    self._primary_action = candidate
+                    break
 
     def mark(self, definition_name: str, action: TerraformAction, status: str) -> None:
         """Update the status of a definition+action pair."""
-        action_val = action.value
-        if action_val not in self._seen_actions:
-            self._seen_actions = [
-                a for a in self.ACTION_ORDER if a in self._seen_actions + [action_val]
-            ]
-        if definition_name not in self._statuses:
-            self._statuses[definition_name] = {}
-        self._statuses[definition_name][action_val] = status
+        with self._lock:
+            action_val = action.value
+            if action_val not in self._expected_actions:
+                self._expected_actions = [
+                    a
+                    for a in self.ACTION_ORDER
+                    if a in self._expected_actions + [action_val]
+                ]
+            if definition_name not in self._records:
+                self._records[definition_name] = DefinitionRecord(definition_name)
+            rec = self._records[definition_name]
+            rec.statuses[action_val] = status
+            now = time.monotonic()
+            if status == "running" and rec.started_at is None:
+                rec.started_at = now
+            if status in TERMINAL_STATUSES and self._classify(rec) not in (
+                "running",
+                "queued",
+            ):
+                rec.finished_at = now
 
-    def is_terminal(self) -> bool:
-        """Return True when no definition+action remains pending or running."""
-        for action_statuses in self._statuses.values():
-            for action_val in self._seen_actions:
-                if action_statuses.get(action_val, "pending") in ("pending", "running"):
-                    return False
-        return True
+    def record_result(
+        self,
+        definition_name: str,
+        action: TerraformAction,
+        result: Optional["TerraformResult"],
+        failed: bool = False,
+    ) -> None:
+        """Capture plan/apply output details or an error snippet for a definition."""
+        if result is None:
+            return
+        with self._lock:
+            rec = self._records.get(definition_name)
+            if rec is None:
+                return
+            text = _ANSI_RE.sub("", f"{result.stdout_str}\n{result.stderr_str}")
+            if failed:
+                rec.error_action = action.value
+                rec.error_snippet = self._extract_error(text)
+                return
+            if action == TerraformAction.PLAN:
+                match = _PLAN_LINE_RE.search(text)
+                if match:
+                    rec.plan_line = match.group(0).rstrip(".")
+                    rec.planned_changes = sum(
+                        int(n) for n in _PLAN_COUNT_RE.findall(match.group(0))
+                    )
+                elif "No changes." in text:
+                    rec.planned_changes = 0
+            elif action in (TerraformAction.APPLY, TerraformAction.DESTROY):
+                match = _APPLY_LINE_RE.search(text)
+                if match:
+                    rec.applied_changes = sum(
+                        int(n) for n in _APPLY_COUNT_RE.findall(match.group(0))
+                    )
 
-    def overall_status(self) -> str:
-        """Return 'in_progress', 'failed', or 'done'."""
-        if not self.is_terminal():
-            return "in_progress"
-        for action_statuses in self._statuses.values():
-            if "failed" in action_statuses.values():
-                return "failed"
-        return "done"
+    @staticmethod
+    def _extract_error(text: str) -> str:
+        """Pull the most useful error line(s) out of terraform output."""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for i, line in enumerate(lines):
+            if "Error:" in line:
+                return " ".join(lines[i : i + 3])
+        return " ".join(lines[-3:]) if lines else "unknown error"
 
-    def failed_count(self) -> int:
-        """Return number of definition+action pairs that failed."""
-        return sum(
-            1
-            for action_statuses in self._statuses.values()
-            for status in action_statuses.values()
-            if status == "failed"
-        )
-
-    def skipped_count(self) -> int:
-        """Return number of definition+action pairs that were skipped."""
-        return sum(
-            1
-            for action_statuses in self._statuses.values()
-            for status in action_statuses.values()
-            if status == "skipped"
-        )
-
-    def _resolve_git_context(self, working_dir: str) -> str | None:
+    def _resolve_git_context(self, working_dir: str) -> None:
         """Resolve branch and commit from CI env vars or git subprocess."""
         branch = os.environ.get("GITHUB_REF_NAME") or os.environ.get(
             "CI_COMMIT_REF_NAME"
@@ -185,206 +341,682 @@ class SlackStatusBoard:
             except Exception:
                 pass
 
-        parts = []
-        if branch:
-            parts.append(f"Branch: {branch}")
-        if commit:
-            parts.append(f"Commit: {commit}")
-        return "  ".join(parts) if parts else None
+        self._branch = branch or None
+        self._commit = commit or None
 
-    def _status_counts(self) -> dict[str, int]:
-        """Count definition+action pairs by status across all seen actions."""
-        counts: dict[str, int] = {}
-        for action_statuses in self._statuses.values():
-            for action_val in self._seen_actions:
-                st = action_statuses.get(action_val, "pending")
-                counts[st] = counts.get(st, 0) + 1
-        return counts
+    # ------------------------------------------------------------------
+    # classification / aggregation
+    # ------------------------------------------------------------------
+    def _classify(self, rec: DefinitionRecord) -> str:
+        """Classify a definition as failed, running, ok, skipped, or queued."""
+        vals = [rec.statuses.get(a, "pending") for a in self._expected_actions]
+        if "failed" in vals:
+            return "failed"
+        if "running" in vals:
+            return "running"
+        if vals and all(v in TERMINAL_STATUSES for v in vals):
+            return "skipped" if all(v == "skipped" for v in vals) else "ok"
+        return "queued"
 
-    def _banner(self) -> str:
-        """Overall status banner text."""
-        overall = self.overall_status()
-        if overall == "in_progress":
-            return "🟡  *In progress*"
-        if overall == "done":
-            skipped = self.skipped_count()
-            if skipped:
-                return f"✅  *Run complete — {skipped} action(s) skipped*"
-            return "✅  *Run complete — all definitions succeeded*"
-        return f"❌  *Run failed — {self.failed_count()} action(s) errored*"
+    def _buckets(self) -> dict[str, list[DefinitionRecord]]:
+        buckets: dict[str, list[DefinitionRecord]] = {
+            "failed": [],
+            "running": [],
+            "ok": [],
+            "skipped": [],
+            "queued": [],
+        }
+        for rec in self._records.values():
+            buckets[self._classify(rec)].append(rec)
+        buckets["running"].sort(key=lambda r: r.started_at or 0.0)
+        return buckets
 
-    def _build_summary_blocks(self) -> list[dict]:
-        """Compact parent-message blocks: header, git context, banner, counts.
+    @staticmethod
+    def _no_changes(rec: DefinitionRecord) -> bool:
+        """True when a finished definition made (and planned) no changes."""
+        if rec.applied_changes:
+            return False
+        return rec.planned_changes == 0 or rec.statuses.get("apply") == "skipped"
 
-        Kept well under Slack's 50-block limit; the per-definition table lives in
-        threaded detail messages (see _build_detail_chunks).
-        """
-        blocks: list[dict] = []
+    def is_terminal(self) -> bool:
+        """Return True when no definition remains queued or running."""
+        buckets = self._buckets()
+        return not buckets["running"] and not buckets["queued"]
 
-        title = self._title or self._deployment or "Terraform run"
-        header_text = f"🏗️  {title}"
+    def overall_status(self) -> str:
+        """Return 'in_progress', 'failed', or 'done'."""
+        if not self.is_terminal():
+            return "in_progress"
+        if self._buckets()["failed"]:
+            return "failed"
+        return "done"
+
+    def _total_resource_changes(self) -> int:
+        applied = sum(r.applied_changes or 0 for r in self._records.values())
+        if applied:
+            return applied
+        return sum(r.planned_changes or 0 for r in self._records.values())
+
+    def _nouns(self) -> tuple[str, str, str]:
+        return self.ACTION_NOUNS[self._primary_action]
+
+    def _elapsed_text(self) -> str:
+        secs = int(time.monotonic() - self._started_monotonic)
+        if secs < 90:
+            return f"{secs}s"
+        return f"{round(secs / 60)} min"
+
+    def _clock(self, dt: datetime) -> str:
+        return dt.strftime("%H:%M UTC")
+
+    def _run_key(self) -> str:
+        raw = self._run_id or self._deployment or "run"
+        return "tfworker_" + re.sub(r"[^A-Za-z0-9_]", "_", str(raw))
+
+    def _display_name(self) -> str:
+        return self._config.title or self._deployment or "terraform"
+
+    # ------------------------------------------------------------------
+    # block building
+    # ------------------------------------------------------------------
+    def _links_suffix(self) -> str:
+        return "".join(f" · <{lk.url}|{lk.text}>" for lk in self._config.links)
+
+    def _subtitle(self) -> str:
+        parts: list[str] = []
         if self._run_id:
-            header_text += f"  |  run: {self._run_id}"
-        blocks.append(
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": header_text, "emoji": True},
-            }
-        )
+            parts.append(f"run `{self._run_id}`")
+        if self._branch:
+            branch = f"branch `{self._branch}`"
+            if self._commit:
+                branch += f" (`{self._commit}`)"
+            parts.append(branch)
+        elif self._commit:
+            parts.append(f"commit `{self._commit}`")
+        if self.overall_status() == "in_progress":
+            parts.append(f"started {self._clock(self._started_wall)}")
+            parts.append(f"updated {self._clock(datetime.now(timezone.utc))}")
+        else:
+            parts.append(f"finished in {self._elapsed_text()}")
+        return " · ".join(parts)
 
-        if self._git_context:
-            blocks.append(
-                {
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": self._git_context}],
-                }
+    def _status_section(self, buckets: dict) -> dict:
+        _, ing, _ = self._nouns()
+        total = len(self._records)
+        overall = self.overall_status()
+        if overall == "done":
+            text = f":white_check_mark: *Run complete — {total} definitions succeeded*"
+        elif overall == "failed":
+            failed = len(buckets["failed"])
+            text = f":x: *Run failed — {failed} of {total} definitions errored*"
+        else:
+            finished = (
+                len(buckets["failed"]) + len(buckets["ok"]) + len(buckets["skipped"])
             )
-
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": self._banner()}}
-        )
-
-        counts = self._status_counts()
-        order = [
-            ("running", "🔄"),
-            ("pending", "⏳"),
-            ("changes", "🔵"),
-            ("done", "✅"),
-            ("failed", "❌"),
-            ("skipped", "—"),
-        ]
-        tallies = "  ".join(f"{emoji} {counts[k]}" for k, emoji in order if counts.get(k))
-        summary = f"*{len(self._statuses)}* definition(s)"
-        if tallies:
-            summary += f"   |   {tallies}"
-        summary += "   ·   🧵 per-definition status in thread"
-        blocks.append(
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": summary}]}
-        )
-
-        return blocks
-
-    def _build_detail_chunks(self) -> list[list[dict]]:
-        """Per-definition status table, split into thread messages under the block limit.
-
-        Each chunk is one threaded message: a context header + the column header +
-        up to DETAIL_ROWS_PER_MSG definition rows (<= MAX_BLOCKS blocks total).
-        """
-        if not (self._seen_actions and self._statuses):
-            return []
-
-        action_labels = "  ".join(f"*{a.capitalize()}*" for a in self._seen_actions)
-        header_field = {
+            running = len(buckets["running"])
+            if running:
+                text = (
+                    f":arrows_counterclockwise: *{ing}* — {running} "
+                    f"definition{'s' if running != 1 else ''} running · "
+                    f"{finished} of {total} finished"
+                )
+            else:
+                text = (
+                    f":arrows_counterclockwise: *{ing}* — "
+                    f"{finished} of {total} finished"
+                )
+        return {
             "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": "*Definition*"},
-                {"type": "mrkdwn", "text": action_labels},
-            ],
+            "block_id": "run_status",
+            "text": {"type": "mrkdwn", "text": text},
         }
 
-        items = list(self._statuses.items())
-        total = len(items)
-        rows = self.DETAIL_ROWS_PER_MSG
-        n_chunks = max(1, (total + rows - 1) // rows)
+    def _counts_context(self, buckets: dict) -> dict:
+        _, _, past = self._nouns()
+        overall = self.overall_status()
+        ok = [r for r in buckets["ok"] if not self._no_changes(r)]
+        no_change = [r for r in buckets["ok"] if self._no_changes(r)]
+        skipped = len(buckets["skipped"]) + len(no_change)
 
-        chunks: list[list[dict]] = []
-        for i in range(n_chunks):
-            start, end = i * rows, min((i + 1) * rows, total)
-            label = f"Definitions {start + 1}–{end} of {total}"
-            if n_chunks > 1:
-                label += f"   (part {i + 1}/{n_chunks})"
-            blocks: list[dict] = [
-                {"type": "context", "elements": [{"type": "mrkdwn", "text": label}]},
-                header_field,
-            ]
-            for def_name, action_statuses in items[start:end]:
-                emoji_row = "  ".join(
-                    self.STATUS_EMOJI.get(
-                        action_statuses.get(action_val, "pending"), "❓"
-                    )
-                    for action_val in self._seen_actions
+        elements: list[dict] = [
+            {"type": "mrkdwn", "text": f"*{len(self._records)}* definitions"}
+        ]
+        if ok:
+            elements.append(
+                {"type": "mrkdwn", "text": f":white_check_mark: *{len(ok)}* {past}"}
+            )
+        if buckets["failed"]:
+            elements.append(
+                {"type": "mrkdwn", "text": f":x: *{len(buckets['failed'])}* failed"}
+            )
+        if overall == "in_progress":
+            if buckets["running"]:
+                elements.append(
+                    {
+                        "type": "mrkdwn",
+                        "text": f":arrows_counterclockwise: *{len(buckets['running'])}* running",
+                    }
                 )
+            if buckets["queued"]:
+                elements.append(
+                    {
+                        "type": "mrkdwn",
+                        "text": f":hourglass: *{len(buckets['queued'])}* queued",
+                    }
+                )
+        if skipped:
+            elements.append(
+                {"type": "mrkdwn", "text": f":fast_forward: *{skipped}* skipped"}
+            )
+        if overall != "in_progress":
+            changes = self._total_resource_changes()
+            if changes:
+                label = (
+                    "resource changes planned"
+                    if self._primary_action == "plan"
+                    else "resources changed"
+                )
+                elements.append({"type": "mrkdwn", "text": f"{changes} {label}"})
+        return {"type": "context", "block_id": "run_counts", "elements": elements}
+
+    def _links_context(self) -> dict:
+        text = ":thread: per-definition table in thread" + self._links_suffix()
+        return {
+            "type": "context",
+            "block_id": "run_links",
+            "elements": [{"type": "mrkdwn", "text": text}],
+        }
+
+    def _failures_table(self, failed: list[DefinitionRecord]) -> list[dict]:
+        rows: list[list[dict]] = [
+            [
+                {"type": "raw_text", "text": "Definition"},
+                {"type": "raw_text", "text": "Stage"},
+                {"type": "raw_text", "text": "Error"},
+            ]
+        ]
+        for rec in failed[: self.MAX_FAILURE_TABLE_ROWS]:
+            rows.append(
+                [
+                    _rich_text(
+                        [{"type": "text", "text": rec.name, "style": {"code": True}}]
+                    ),
+                    {"type": "raw_text", "text": rec.error_action or "?"},
+                    {
+                        "type": "raw_text",
+                        "text": _truncate(
+                            rec.error_snippet or "unknown error",
+                            self.FAILURE_ERROR_CHARS,
+                        ),
+                    },
+                ]
+            )
+        remainder = len(failed) - self.MAX_FAILURE_TABLE_ROWS
+        more_text = ":thread: full sortable table in thread" + self._links_suffix()
+        if remainder > 0:
+            more_text = f"…and *{remainder} more* failures — " + more_text
+        return [
+            {"type": "divider", "block_id": "verdict_divider"},
+            {
+                "type": "table",
+                "block_id": "failures_table",
+                "column_settings": [
+                    {"is_wrapped": False},
+                    {"align": "center"},
+                    {"is_wrapped": True},
+                ],
+                "rows": rows,
+            },
+            {
+                "type": "context",
+                "block_id": "failures_more",
+                "elements": [{"type": "mrkdwn", "text": more_text}],
+            },
+        ]
+
+    def _build_container(self, buckets: dict) -> dict:
+        overall = self.overall_status()
+        noun, _, _ = self._nouns()
+        children: list[dict] = [
+            self._status_section(buckets),
+            self._counts_context(buckets),
+        ]
+        if overall == "failed":
+            children.extend(self._failures_table(buckets["failed"]))
+        else:
+            children.append(self._links_context())
+
+        block: dict = {
+            "type": "container",
+            "block_id": f"{self._run_key()}_container",
+            "title": {
+                "type": "plain_text",
+                "text": f"{noun} — {self._display_name()}",
+            },
+            "subtitle": {"type": "mrkdwn", "text": self._subtitle()},
+            "child_blocks": children,
+        }
+        # has_header_divider and is_collapsible are mutually exclusive on the
+        # Slack API; final states collapse, running states get the divider.
+        if overall == "in_progress":
+            block["has_header_divider"] = True
+        else:
+            block["is_collapsible"] = True
+        return block
+
+    def _error_task(self, rec: DefinitionRecord) -> dict:
+        task: dict = {
+            "task_id": f"fail_{rec.name}",
+            "title": f"{rec.name} — {rec.error_action or 'run'} failed",
+            "status": "error",
+            "output": _rich_text(
+                [
+                    {
+                        "type": "text",
+                        "text": _truncate(
+                            rec.error_snippet or "unknown error",
+                            self.CARD_ERROR_CHARS,
+                        ),
+                        "style": {"code": True},
+                    }
+                ]
+            ),
+        }
+        template = self._config.definition_log_url_template
+        if template:
+            task["sources"] = [
+                {
+                    "type": "url",
+                    "url": template.format(definition=rec.name),
+                    "text": "full error in Datadog",
+                }
+            ]
+        return task
+
+    def _rollup_complete_task(self, buckets: dict) -> dict | None:
+        _, _, past = self._nouns()
+        ok = [r for r in buckets["ok"] if not self._no_changes(r)]
+        if not ok:
+            return None
+        changes = self._total_resource_changes()
+        label = (
+            "resource changes planned"
+            if self._primary_action == "plan"
+            else "resources changed"
+        )
+        summary = f"{changes} {label}" if changes else "no resource changes"
+        return {
+            "task_id": "rollup_complete",
+            "title": f"{len(ok)} definitions {past} cleanly",
+            "status": "complete",
+            "output": _rich_text(
+                [
+                    {
+                        "type": "text",
+                        "text": f"{summary} · {self._elapsed_text()} elapsed",
+                    }
+                ]
+            ),
+        }
+
+    def _build_plan_block(self, buckets: dict) -> dict | None:
+        overall = self.overall_status()
+        if overall == "failed":
+            # final failures live in the container's table instead
+            return None
+
+        _, ing, _ = self._nouns()
+        tasks: list[dict] = []
+
+        rollup = self._rollup_complete_task(buckets)
+        if rollup:
+            tasks.append(rollup)
+
+        if overall == "done":
+            no_change = [r for r in buckets["ok"] if self._no_changes(r)] + buckets[
+                "skipped"
+            ]
+            if no_change:
+                names = ", ".join(r.name for r in no_change[:10])
+                if len(no_change) > 10:
+                    names += ", …"
+                tasks.append(
+                    {
+                        "task_id": "rollup_skipped",
+                        "title": (
+                            f"{len(no_change)} definitions skipped — "
+                            "no changes planned"
+                        ),
+                        "status": "complete",
+                        "details": _rich_text([{"type": "text", "text": names}]),
+                    }
+                )
+            stored = len([r for r in self._records.values() if r.planned_changes])
+            if self._backend_plans and self._primary_action == "plan" and stored:
+                run_ref = f" keyed by run {self._run_id}" if self._run_id else ""
+                tasks.append(
+                    {
+                        "task_id": "rollup_plans",
+                        "title": "Plans stored in S3",
+                        "status": "complete",
+                        "output": _rich_text(
+                            [
+                                {
+                                    "type": "text",
+                                    "text": f"{stored} plans{run_ref} — "
+                                    "re-applyable via --backend-plans",
+                                }
+                            ]
+                        ),
+                    }
+                )
+        else:
+            for rec in buckets["failed"][: self.MAX_ERROR_CARDS]:
+                tasks.append(self._error_task(rec))
+
+            running = buckets["running"]
+            for rec in running[: self.MAX_NAMED_RUNNING]:
+                task: dict = {
+                    "task_id": f"run_{rec.name}",
+                    "title": f"{rec.name} — {ing.lower()}",
+                    "status": "in_progress",
+                }
+                if rec.plan_line:
+                    task["details"] = _rich_text(
+                        [{"type": "text", "text": rec.plan_line}]
+                    )
+                tasks.append(task)
+            extra_running = running[self.MAX_NAMED_RUNNING :]
+            if extra_running:
+                names = ", ".join(r.name for r in extra_running[:10])
+                if len(extra_running) > 10:
+                    names += ", …"
+                tasks.append(
+                    {
+                        "task_id": "rollup_running",
+                        "title": f"…and {len(extra_running)} more {ing.lower()}",
+                        "status": "in_progress",
+                        "details": _rich_text([{"type": "text", "text": names}]),
+                    }
+                )
+            if buckets["queued"]:
+                queued = buckets["queued"]
+                names = ", ".join(r.name for r in queued[:3])
+                if len(queued) > 3:
+                    names += ", …"
+                tasks.append(
+                    {
+                        "task_id": "rollup_queued",
+                        "title": f"{len(queued)} definitions queued",
+                        "status": "pending",
+                        "details": _rich_text(
+                            [{"type": "text", "text": f"next up: {names}"}]
+                        ),
+                    }
+                )
+
+        if not tasks:
+            return None
+        return {
+            "type": "plan",
+            # Slack recommends a fresh block_id for plan blocks on every update
+            "block_id": f"{self._run_key()}_plan_v{self._seq}",
+            "title": "Run progress",
+            "tasks": tasks,
+        }
+
+    def _build_main_blocks(self) -> list[dict]:
+        buckets = self._buckets()
+        blocks: list[dict] = [self._build_container(buckets)]
+        plan_block = self._build_plan_block(buckets)
+        if plan_block:
+            blocks.append(plan_block)
+        return blocks
+
+    def _status_cell(self, status: str) -> dict:
+        if status == "skipped":
+            return {"type": "raw_text", "text": "—"}
+        return _rich_text(
+            [{"type": "emoji", "name": self.RICH_STATUS_EMOJI.get(status, "question")}]
+        )
+
+    def _build_thread_messages(self) -> list[list[dict]]:
+        """Per-definition data_table messages, chunked under the row limit."""
+        if not (self._records and self._expected_actions):
+            return []
+
+        noun, _, _ = self._nouns()
+        header = [{"type": "raw_text", "text": "Definition"}]
+        header += [
+            {"type": "raw_text", "text": a.capitalize()} for a in self._expected_actions
+        ]
+        header += [
+            {"type": "raw_text", "text": "Changed"},
+            {"type": "raw_text", "text": "Secs"},
+        ]
+
+        data_rows: list[list[dict]] = []
+        for rec in self._records.values():
+            row = [
+                _rich_text(
+                    [{"type": "text", "text": rec.name, "style": {"code": True}}]
+                )
+            ]
+            for action_val in self._expected_actions:
+                row.append(self._status_cell(rec.statuses.get(action_val, "pending")))
+            changed = (
+                rec.applied_changes
+                if rec.applied_changes is not None
+                else rec.planned_changes
+            )
+            # Slack rejects empty raw_text cells ("must be more than 0
+            # characters"); unknown values render as an em dash
+            row.append(
+                {"type": "raw_text", "text": "—" if changed is None else str(changed)}
+            )
+            duration = rec.duration_secs()
+            row.append(
+                {"type": "raw_text", "text": "—" if duration is None else str(duration)}
+            )
+            data_rows.append(row)
+
+        caption = f"Per-definition results — {noun.lower()} {self._display_name()}" + (
+            f" run {self._run_id}" if self._run_id else ""
+        )
+        messages: list[list[dict]] = []
+        size = self.MAX_DATA_TABLE_ROWS
+        n_chunks = max(1, (len(data_rows) + size - 1) // size)
+        for i in range(n_chunks):
+            chunk = data_rows[i * size : (i + 1) * size]
+            blocks: list[dict] = []
+            if i == 0:
+                heading = (
+                    f":clipboard: *Per-definition results* — "
+                    f"{noun.lower()} `{self._display_name()}`"
+                )
+                if self._run_id:
+                    heading += f", run `{self._run_id}`"
+                heading += " (sortable & filterable)"
                 blocks.append(
                     {
                         "type": "section",
-                        "fields": [
-                            {"type": "mrkdwn", "text": f"`{def_name}`"},
-                            {"type": "mrkdwn", "text": emoji_row},
-                        ],
+                        "block_id": "detail_heading",
+                        "text": {"type": "mrkdwn", "text": heading},
                     }
                 )
-            chunks.append(blocks)
-        return chunks
+            blocks.append(
+                {
+                    "type": "data_table",
+                    "block_id": f"{self._run_key()}_table_{i}",
+                    "caption": caption
+                    + (f" (part {i + 1}/{n_chunks})" if n_chunks > 1 else ""),
+                    "page_size": self.DATA_TABLE_PAGE_SIZE,
+                    "row_header_column_index": 0,
+                    "rows": [header] + chunk,
+                }
+            )
+            messages.append(blocks)
+        return messages
 
-    def post_or_update(self, client: WebClient) -> None:
-        """Post/refresh the parent summary message and its threaded detail messages.
+    def _fallback_text(self) -> str:
+        noun, _, _ = self._nouns()
+        buckets = self._buckets()
+        total = len(self._records)
+        overall = self.overall_status()
+        name = self._display_name()
+        if overall == "done":
+            return f"{noun} {name}: complete — {total} definitions succeeded"
+        if overall == "failed":
+            failed = len(buckets["failed"])
+            return f"{noun} {name}: failed — {failed} of {total} definitions errored"
+        finished = len(buckets["failed"]) + len(buckets["ok"]) + len(buckets["skipped"])
+        text = f"{noun} {name}: in progress — {finished} of {total} finished"
+        if buckets["failed"]:
+            text += f", {len(buckets['failed'])} failed"
+        return text
 
-        The board is split across messages to stay under Slack's 50-block limit:
-        a compact parent (summary) message is the thread root, and the
-        per-definition table is posted as one or more threaded replies. Messages
-        whose blocks haven't changed since the last call are not re-sent.
+    # ------------------------------------------------------------------
+    # posting
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_for_compare(blocks: list[dict]) -> list[dict]:
+        """Blocks minus volatile fields, so no-op updates can be skipped.
+
+        The plan block gets a fresh block_id each update and the subtitle
+        carries an "updated HH:MM" clock; neither should force a send.
         """
-        fallback_text = f"Terraform run: {self._deployment or 'unknown'}"
+        normalized = copy.deepcopy(blocks)
+        for block in normalized:
+            if block.get("type") == "plan":
+                block["block_id"] = "PLAN"
+            if block.get("type") == "container" and "subtitle" in block:
+                block["subtitle"] = {}
+        return normalized
 
-        # 1) Parent (summary) message — the thread root.
-        summary_blocks = self._build_summary_blocks()
-        try:
-            if self._ts is None:
-                resp = client.chat_postMessage(
-                    channel=self._channel, blocks=summary_blocks, text=fallback_text
-                )
-                self._ts = resp["ts"]
-                self._channel = resp["channel"]
-                self._parent_blocks_sent = summary_blocks
-            elif summary_blocks != self._parent_blocks_sent:
-                client.chat_update(
-                    channel=self._channel,
-                    ts=self._ts,
-                    blocks=summary_blocks,
-                    text=fallback_text,
-                )
-                self._parent_blocks_sent = summary_blocks
-        except Exception as e:
-            log.error(f"Slack API error updating summary message: {e}")
+    def _call_api(self, method, force: bool, **kwargs):
+        """Invoke a Slack API method, honoring Retry-After on 429.
 
-        # Without a parent message we can't create the thread; try again next call.
-        if self._ts is None:
-            return
-
-        # 2) Threaded detail messages, chunked under the block limit.
-        for i, blocks in enumerate(self._build_detail_chunks()):
+        Non-forced calls drop the update on a 429 (the next flush resends the
+        latest snapshot); forced (terminal) calls sleep and retry.
+        """
+        attempts = 3 if force else 1
+        for attempt in range(attempts):
             try:
-                if i < len(self._detail_ts):
-                    if (
-                        i < len(self._detail_blocks_sent)
-                        and blocks == self._detail_blocks_sent[i]
-                    ):
-                        continue  # unchanged; skip the API call
-                    client.chat_update(
+                return method(**kwargs)
+            except SlackApiError as e:
+                status = getattr(e.response, "status_code", None)
+                if status != 429:
+                    raise
+                retry_after = int(e.response.headers.get("Retry-After", "5"))
+                if attempt + 1 < attempts:
+                    time.sleep(min(retry_after, 30))
+                    continue
+                self._next_update_at = time.monotonic() + max(
+                    retry_after, self._config.update_interval
+                )
+                log.warn(f"Slack rate limited; deferring update {retry_after}s")
+                return None
+        return None
+
+    def post_or_update(self, client: WebClient, force: bool = False) -> None:
+        """Post/refresh the channel message and the threaded detail table.
+
+        Updates are debounced to ``update_interval`` seconds so bursts of
+        definition completions coalesce into one snapshot; ``force`` bypasses
+        the debounce for initial/terminal flushes. Messages whose content has
+        not changed are not re-sent.
+        """
+        with self._lock:
+            if not self._records:
+                return
+            now = time.monotonic()
+            if not force and now < self._next_update_at:
+                return
+            self._seq += 1
+            fallback = self._fallback_text()
+
+            # 1) Channel message — the thread root.
+            main_blocks = self._build_main_blocks()
+            try:
+                if self._ts is None:
+                    resp = self._call_api(
+                        client.chat_postMessage,
+                        force,
                         channel=self._channel,
-                        ts=self._detail_ts[i],
-                        blocks=blocks,
-                        text=fallback_text,
+                        blocks=main_blocks,
+                        text=fallback,
                     )
-                    while len(self._detail_blocks_sent) <= i:
-                        self._detail_blocks_sent.append(None)
-                    self._detail_blocks_sent[i] = blocks
-                else:
-                    resp = client.chat_postMessage(
+                    if resp is not None:
+                        self._ts = resp["ts"]
+                        self._channel = resp["channel"]
+                        self._main_sent = self._normalize_for_compare(main_blocks)
+                elif (
+                    self._normalize_for_compare(main_blocks) != self._main_sent
+                    or self.overall_status() != "in_progress"
+                ):
+                    resp = self._call_api(
+                        client.chat_update,
+                        force,
                         channel=self._channel,
-                        thread_ts=self._ts,
-                        blocks=blocks,
-                        text=fallback_text,
+                        ts=self._ts,
+                        blocks=main_blocks,
+                        text=fallback,
                     )
-                    self._detail_ts.append(resp["ts"])
-                    self._detail_blocks_sent.append(blocks)
+                    if resp is not None:
+                        self._main_sent = self._normalize_for_compare(main_blocks)
             except Exception as e:
-                log.error(f"Slack API error updating detail message {i + 1}: {e}")
+                log.error(f"Slack API error updating run message: {e}")
+
+            # Without a channel message there is no thread; try again next call.
+            if self._ts is None:
+                return
+
+            # 2) Threaded per-definition table.
+            for i, blocks in enumerate(self._build_thread_messages()):
+                try:
+                    if i < len(self._thread_ts):
+                        if (
+                            i < len(self._thread_sent)
+                            and blocks == self._thread_sent[i]
+                        ):
+                            continue
+                        resp = self._call_api(
+                            client.chat_update,
+                            force,
+                            channel=self._channel,
+                            ts=self._thread_ts[i],
+                            blocks=blocks,
+                            text=f"Per-definition results: {self._display_name()}",
+                        )
+                        if resp is not None:
+                            while len(self._thread_sent) <= i:
+                                self._thread_sent.append(None)
+                            self._thread_sent[i] = blocks
+                    else:
+                        resp = self._call_api(
+                            client.chat_postMessage,
+                            force,
+                            channel=self._channel,
+                            thread_ts=self._ts,
+                            blocks=blocks,
+                            text=f"Per-definition results: {self._display_name()}",
+                        )
+                        if resp is not None:
+                            self._thread_ts.append(resp["ts"])
+                            self._thread_sent.append(blocks)
+                except Exception as e:
+                    log.error(f"Slack API error updating detail message {i + 1}: {e}")
+
+            # max() preserves a longer deferral set by a 429 Retry-After
+            self._next_update_at = max(
+                self._next_update_at,
+                time.monotonic() + self._config.update_interval,
+            )
 
 
 @HandlerRegistry.register("slack")
 class SlackHandler(BaseHandler):
-    """Post a live-updating Slack status board for each terraform-worker run."""
+    """Post a live-updating Slack report for each terraform-worker run."""
 
     actions = [
         TerraformAction.INIT,
@@ -398,21 +1030,21 @@ class SlackHandler(BaseHandler):
     def __init__(self, config: SlackConfig) -> None:
         self.config = config
         self._client = WebClient(token=config.resolved_token)
-        run_id = self._get_run_id()
         self._board = SlackStatusBoard(
-            channel=config.channel,
-            title=config.title,
-            run_id=run_id,
+            config=config,
+            run_id=self._get_root_option("run_id"),
+            backend_plans=bool(self._get_root_option("backend_plans")),
         )
         self._ready = True
 
     def is_ready(self) -> bool:
         return self._ready
 
-    def _get_run_id(self) -> str | None:
-        """Retrieve run_id from app state; return None on any failure."""
+    @staticmethod
+    def _get_root_option(attr: str):
+        """Read an option from app state; return None on any failure."""
         try:
-            return click.get_current_context().obj.root_options.run_id
+            return getattr(click.get_current_context().obj.root_options, attr)
         except Exception:
             return None
 
@@ -423,7 +1055,7 @@ class SlackHandler(BaseHandler):
         working_dir: str,
         terraform_options,
     ) -> None:
-        """Pre-populate the board with all definitions and infer expected action columns."""
+        """Pre-populate the board with all definitions and expected actions."""
         try:
             expected_actions = [TerraformAction.INIT]
             if getattr(terraform_options, "plan", False) or getattr(
@@ -437,14 +1069,11 @@ class SlackHandler(BaseHandler):
             if getattr(terraform_options, "destroy", False):
                 expected_actions.append(TerraformAction.DESTROY)
 
+            self._board.set_expected_actions(expected_actions)
             for defn in definitions.values():
                 self._board.ensure_definition(defn.name, deployment, working_dir)
-                for action in expected_actions:
-                    action_val = action.value
-                    if action_val not in self._board._statuses[defn.name]:
-                        self._board.mark(defn.name, action, "pending")
 
-            self._board.post_or_update(self._client)
+            self._board.post_or_update(self._client, force=True)
         except Exception as e:
             log.error(f"SlackHandler.setup error: {e}")
 
@@ -455,12 +1084,15 @@ class SlackHandler(BaseHandler):
     ) -> None:
         """Finalize the board; resolve any unfinished statuses."""
         try:
-            for action_statuses in self._board._statuses.values():
-                for action_val in list(action_statuses):
-                    if action_statuses[action_val] in ("running", "pending"):
-                        action_statuses[action_val] = "skipped"
+            for rec in self._board._records.values():
+                for action_val in self._board._expected_actions:
+                    if rec.statuses.get(action_val, "pending") in (
+                        "pending",
+                        "running",
+                    ):
+                        rec.statuses[action_val] = "skipped"
 
-            self._board.post_or_update(self._client)
+            self._board.post_or_update(self._client, force=True)
         except Exception as e:
             log.error(f"SlackHandler.teardown error: {e}")
 
@@ -489,8 +1121,20 @@ class SlackHandler(BaseHandler):
             else:
                 status = "failed"
             self._board.mark(definition.name, action, status)
+            self._board.record_result(
+                definition.name, action, result, failed=(status == "failed")
+            )
+            # a clean plan with no changes means apply will be skipped; mark it
+            # now so finished counts stay accurate during the run
+            if (
+                action == TerraformAction.PLAN
+                and status == "done"
+                and "apply" in self._board._expected_actions
+            ):
+                self._board.mark(definition.name, TerraformAction.APPLY, "skipped")
             self._board.post_or_update(self._client)
 
         elif stage == TerraformStage.ERROR:
             self._board.mark(definition.name, action, "failed")
+            self._board.record_result(definition.name, action, result, failed=True)
             self._board.post_or_update(self._client)
