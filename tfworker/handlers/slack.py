@@ -123,6 +123,7 @@ class DefinitionRecord:
 
     __slots__ = (
         "name",
+        "expected",
         "statuses",
         "started_at",
         "action_started",
@@ -136,6 +137,9 @@ class DefinitionRecord:
 
     def __init__(self, name: str) -> None:
         self.name = name
+        # actions this definition is expected to run; seeded from the run's
+        # expected actions, extended per definition (e.g. always_apply)
+        self.expected: list[str] = []
         self.statuses: dict[str, str] = {}
         self.started_at: float | None = None
         self.action_started: dict[str, float] = {}
@@ -232,7 +236,25 @@ class SlackStatusBoard:
                 self._deployment = deployment
                 self._resolve_git_context(working_dir)
             if definition_name not in self._records:
-                self._records[definition_name] = DefinitionRecord(definition_name)
+                rec = DefinitionRecord(definition_name)
+                rec.expected = list(self._expected_actions)
+                self._records[definition_name] = rec
+
+    def add_definition_action(
+        self, definition_name: str, action: TerraformAction
+    ) -> None:
+        """Expect an extra action for one definition (e.g. always_apply).
+
+        Kept per definition rather than run-wide: one always_apply definition
+        must not make a plan-only run present as an apply, nor give every
+        other definition an apply expectation it can never satisfy.
+        """
+        with self._lock:
+            rec = self._records[definition_name]
+            if action.value not in rec.expected:
+                rec.expected = [
+                    a for a in self.ACTION_ORDER if a in rec.expected + [action.value]
+                ]
 
     def set_expected_actions(self, actions: list[TerraformAction]) -> None:
         """Set the action columns for the run and derive the primary action."""
@@ -248,15 +270,15 @@ class SlackStatusBoard:
         """Update the status of a definition+action pair."""
         with self._lock:
             action_val = action.value
-            if action_val not in self._expected_actions:
-                self._expected_actions = [
-                    a
-                    for a in self.ACTION_ORDER
-                    if a in self._expected_actions + [action_val]
-                ]
             if definition_name not in self._records:
-                self._records[definition_name] = DefinitionRecord(definition_name)
+                rec = DefinitionRecord(definition_name)
+                rec.expected = list(self._expected_actions)
+                self._records[definition_name] = rec
             rec = self._records[definition_name]
+            if action_val not in rec.expected:
+                rec.expected = [
+                    a for a in self.ACTION_ORDER if a in rec.expected + [action_val]
+                ]
             rec.statuses[action_val] = status
             now = time.monotonic()
             if status == "running":
@@ -308,15 +330,16 @@ class SlackStatusBoard:
                         int(n) for n in _APPLY_COUNT_RE.findall(match.group(0))
                     )
 
-    def expects(self, action: TerraformAction) -> bool:
-        """Return True when the run is expected to perform the given action."""
-        return action.value in self._expected_actions
+    def expects(self, action: TerraformAction, definition_name: str) -> bool:
+        """Return True when the given definition is expected to run the action."""
+        rec = self._records.get(definition_name)
+        return rec is not None and action.value in rec.expected
 
     def finalize(self) -> None:
         """Resolve statuses left pending/running as skipped (run over or aborted)."""
         with self._lock:
             for rec in self._records.values():
-                for action_val in self._expected_actions:
+                for action_val in rec.expected:
                     if rec.statuses.get(action_val, "pending") in (
                         "pending",
                         "running",
@@ -384,7 +407,7 @@ class SlackStatusBoard:
         run resolved by teardown) — conflating them would misreport clean
         plans as not having run.
         """
-        vals = [rec.statuses.get(a, "pending") for a in self._expected_actions]
+        vals = [rec.statuses.get(a, "pending") for a in rec.expected]
         if "failed" in vals:
             return "failed"
         if "running" in vals:
@@ -393,7 +416,7 @@ class SlackStatusBoard:
             return "queued"
         if all(v == "skipped" for v in vals):
             return "skipped"
-        if "plan" in self._expected_actions and rec.statuses.get("plan") == "skipped":
+        if "plan" in rec.expected and rec.statuses.get("plan") == "skipped":
             return "skipped"
         if not rec.applied_changes and (
             rec.planned_changes == 0 or rec.statuses.get("apply") == "skipped"
@@ -879,10 +902,15 @@ class SlackStatusBoard:
             return []
 
         noun, _, _ = self._nouns()
-        header = [{"type": "raw_text", "text": "Definition"}]
-        header += [
-            {"type": "raw_text", "text": a.capitalize()} for a in self._expected_actions
+        # column per action any definition expects (always_apply can add an
+        # apply column to a plan-only run for just those definitions)
+        columns = [
+            a
+            for a in self.ACTION_ORDER
+            if any(a in r.expected for r in self._records.values())
         ]
+        header = [{"type": "raw_text", "text": "Definition"}]
+        header += [{"type": "raw_text", "text": a.capitalize()} for a in columns]
         header += [
             {"type": "raw_text", "text": "Changed"},
             {"type": "raw_text", "text": "Ran (s)"},
@@ -895,8 +923,13 @@ class SlackStatusBoard:
                     [{"type": "text", "text": rec.name, "style": {"code": True}}]
                 )
             ]
-            for action_val in self._expected_actions:
-                row.append(self._status_cell(rec.statuses.get(action_val, "pending")))
+            for action_val in columns:
+                if action_val not in rec.expected:
+                    row.append({"type": "raw_text", "text": "—"})
+                else:
+                    row.append(
+                        self._status_cell(rec.statuses.get(action_val, "pending"))
+                    )
             changed = (
                 rec.applied_changes
                 if rec.applied_changes is not None
@@ -1192,9 +1225,7 @@ class SlackHandler(BaseHandler):
                 terraform_options, "plan_destroy", False
             ):
                 expected_actions.append(TerraformAction.PLAN)
-            if getattr(terraform_options, "apply", False) or any(
-                getattr(defn, "always_apply", False) for defn in definitions.values()
-            ):
+            if getattr(terraform_options, "apply", False):
                 expected_actions.append(TerraformAction.APPLY)
             if getattr(terraform_options, "destroy", False):
                 expected_actions.append(TerraformAction.DESTROY)
@@ -1202,6 +1233,10 @@ class SlackHandler(BaseHandler):
             self._board.set_expected_actions(expected_actions)
             for defn in definitions.values():
                 self._board.ensure_definition(defn.name, deployment, working_dir)
+                # always_apply applies right after its plan even in plan-only
+                # runs — an expectation for this definition, not the whole run
+                if getattr(defn, "always_apply", False):
+                    self._board.add_definition_action(defn.name, TerraformAction.APPLY)
 
             self._board.post_or_update(self._client, force=True)
         except Exception as e:
@@ -1255,7 +1290,7 @@ class SlackHandler(BaseHandler):
                 if (
                     action == TerraformAction.PLAN
                     and status == "done"
-                    and self._board.expects(TerraformAction.APPLY)
+                    and self._board.expects(TerraformAction.APPLY, definition.name)
                 ):
                     self._board.mark(definition.name, TerraformAction.APPLY, "skipped")
                 self._board.post_or_update(self._client)

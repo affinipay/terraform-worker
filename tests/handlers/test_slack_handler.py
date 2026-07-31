@@ -647,7 +647,6 @@ class TestSlackHandler:
         "options,definition,expected",
         [
             ({}, make_definition("d"), ["init", "plan"]),
-            ({}, make_definition("d", always_apply=True), ["init", "plan", "apply"]),
             (
                 {"plan": False, "destroy": True},
                 make_definition("d"),
@@ -664,6 +663,38 @@ class TestSlackHandler:
         handler = make_handler()
         handler.setup("apps-qa", {"d": definition}, "/tmp", make_options(**options))
         assert handler._board._expected_actions == expected
+
+    def test_always_apply_is_per_definition_not_run_wide(self):
+        handler = make_handler()
+        definitions = {
+            "normal": make_definition("normal"),
+            "always": make_definition("always", always_apply=True),
+        }
+        handler.setup("apps-qa", definitions, "/tmp", make_options())
+        board = handler._board
+
+        # one always_apply definition must not turn a plan run into an apply
+        assert board._primary_action == "plan"
+        assert board._records["normal"].expected == ["init", "plan"]
+        assert board._records["always"].expected == ["init", "plan", "apply"]
+
+        # the apply column appears, but only for the always_apply definition
+        table = board._build_thread_messages()[0][1]
+        assert [c["text"] for c in table["rows"][0]][:4] == [
+            "Definition",
+            "Init",
+            "Plan",
+            "Apply",
+        ]
+        normal_row, always_row = table["rows"][1], table["rows"][2]
+        assert normal_row[3] == {"type": "raw_text", "text": "—"}
+        assert always_row[3]["type"] == "rich_text"  # pending hourglass
+
+        # a planned-changes definition finishes at plan and counts as planned,
+        # not "no changes" from an apply expectation it never had
+        board.mark("normal", TerraformAction.INIT, "done")
+        board.mark("normal", TerraformAction.PLAN, "changes")
+        assert board._classify(board._records["normal"]) == "ok"
 
     @pytest.mark.parametrize(
         "action,result,expected_status",
