@@ -173,10 +173,7 @@ def test_failed_lifecycle_with_overflow_failures(client, slack_errors):
         board.post_or_update(client, force=True)  # in-progress with error cards
 
         # teardown behavior: unfinished becomes skipped, final failed state
-        for rec in board._records.values():
-            for action in board._expected_actions:
-                if rec.statuses.get(action, "pending") in ("pending", "running"):
-                    rec.statuses[action] = "skipped"
+        board.finalize()
         board.post_or_update(client, force=True)
 
         assert board.overall_status() == "failed"

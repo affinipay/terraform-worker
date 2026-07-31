@@ -208,6 +208,17 @@ class TestResultParsing:
         board.record_result("vpc", TerraformAction.APPLY, None, failed=True)
         assert board._records["vpc"].error_snippet is None
 
+    def test_non_utf8_output_does_not_raise(self):
+        board = make_board()
+        register(board, "vpc")
+        board.record_result(
+            "vpc",
+            TerraformAction.APPLY,
+            TerraformResult(1, b"\xff\xfe bad bytes", b"Error: broken \xff"),
+            failed=True,
+        )
+        assert "broken" in board._records["vpc"].error_snippet
+
 
 class TestGitContext:
     def test_ci_env_vars(self):
@@ -284,7 +295,7 @@ class TestMainBlocks:
         assert "has_header_divider" not in container
         assert "finished in" in container["subtitle"]["text"]
         verdict = container["child_blocks"][0]["text"]["text"]
-        assert "Run complete — 2 definitions succeeded" in verdict
+        assert "Run complete — 1 applied, 1 skipped" in verdict
 
         assert all(t["status"] == "complete" for t in plan["tasks"])
         skipped = next(t for t in plan["tasks"] if t["task_id"] == "rollup_skipped")
@@ -322,8 +333,9 @@ class TestPlanBlock:
         assert first != board._build_main_blocks()[1]["block_id"]
 
     def test_error_cards_capped_with_datadog_sources(self):
+        # the literal braces in the template must not raise (str.format would)
         board = make_board(
-            definition_log_url_template="https://dd.example/logs?q={definition}"
+            definition_log_url_template='https://dd.example/logs?q={"svc"}&def={definition}'
         )
         register(board, *[f"def{i}" for i in range(10)])
         for i in range(8):
@@ -333,7 +345,10 @@ class TestPlanBlock:
         plan = board._build_main_blocks()[1]
         errors = [t for t in plan["tasks"] if t["status"] == "error"]
         assert len(errors) == board.MAX_ERROR_CARDS
-        assert errors[0]["sources"][0]["url"] == "https://dd.example/logs?q=def0"
+        assert (
+            errors[0]["sources"][0]["url"]
+            == 'https://dd.example/logs?q={"svc"}&def=def0'
+        )
 
     def test_running_tasks_named_oldest_first_then_rolled_up(self):
         board = make_board()
@@ -463,6 +478,19 @@ class TestThreadMessages:
         assert len(messages[1][0]["rows"]) == 51
         assert "part 2/2" in messages[1][0]["caption"]
 
+    def test_chunking_by_character_budget(self):
+        board = make_board()
+        register(board, *["x" * 400 + str(i) for i in range(100)])
+        messages = board._build_thread_messages()
+        # 100 rows fit the row limit but blow the 18k char budget
+        assert len(messages) > 1
+        for blocks in messages:
+            table = blocks[-1]
+            chars = sum(
+                board._cell_chars(cell) for row in table["rows"] for cell in row
+            )
+            assert chars <= board.MAX_DATA_TABLE_CHARS + 500  # header overhead
+
 
 class TestFallbackText:
     def test_covers_each_state(self):
@@ -471,7 +499,7 @@ class TestFallbackText:
         finish_ok(board, "a")
         assert "Apply apps/qa: in progress — 1 of 2 finished" in board._fallback_text()
         finish_ok(board, "b")
-        assert "complete — 2 definitions succeeded" in board._fallback_text()
+        assert "complete — 2 applied" in board._fallback_text()
         fail_def(board, "b")
         assert "failed — 1 of 2 definitions errored" in board._fallback_text()
 
@@ -515,19 +543,22 @@ class TestPostOrUpdate:
         board.post_or_update(client, force=True)
         assert client.chat_update.called
 
-    def test_no_post_without_definitions(self):
+    def test_zero_definition_run_still_posts(self):
         client = make_client()
-        make_board().post_or_update(client)
-        client.chat_postMessage.assert_not_called()
+        make_board().post_or_update(client, force=True)
+        client.chat_postMessage.assert_called_once()
 
-    def test_slack_error_is_logged_not_raised(self):
-        board = make_board()
+    def test_slack_error_is_logged_not_raised_and_debounced(self):
+        board = make_board(update_interval=300.0)
         register(board, "a")
         client = make_client()
         client.chat_postMessage.side_effect = SlackApiError(
             "boom", MagicMock(status_code=500)
         )
         board.post_or_update(client)  # must not raise
+        # a failed post must still engage the debounce, not retry per event
+        board.post_or_update(client)
+        assert client.chat_postMessage.call_count == 1
 
     def test_rate_limited_update_is_dropped_and_deferred(self):
         board = make_board()

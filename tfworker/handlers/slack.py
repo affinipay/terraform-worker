@@ -43,7 +43,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Union
 
 import click
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -125,7 +125,8 @@ class DefinitionRecord:
         "name",
         "statuses",
         "started_at",
-        "finished_at",
+        "action_started",
+        "work_secs",
         "plan_line",
         "planned_changes",
         "applied_changes",
@@ -137,7 +138,8 @@ class DefinitionRecord:
         self.name = name
         self.statuses: dict[str, str] = {}
         self.started_at: float | None = None
-        self.finished_at: float | None = None
+        self.action_started: dict[str, float] = {}
+        self.work_secs: float = 0.0
         self.plan_line: str | None = None
         self.planned_changes: int | None = None
         self.applied_changes: int | None = None
@@ -145,9 +147,13 @@ class DefinitionRecord:
         self.error_snippet: str | None = None
 
     def duration_secs(self) -> int | None:
-        if self.started_at is None or self.finished_at is None:
-            return None
-        return int(self.finished_at - self.started_at)
+        """Seconds spent actually running actions for this definition.
+
+        Summed per action rather than start-to-finish: all inits run (in
+        parallel) long before a definition's serial plan/apply, so wall time
+        would report near-whole-run durations for every definition.
+        """
+        return int(self.work_secs) if self.work_secs else None
 
 
 class SlackStatusBoard:
@@ -179,6 +185,7 @@ class SlackStatusBoard:
     MAX_NAMED_RUNNING: int = 2
     MAX_FAILURE_TABLE_ROWS: int = 5
     MAX_DATA_TABLE_ROWS: int = 200
+    MAX_DATA_TABLE_CHARS: int = 18000
     DATA_TABLE_PAGE_SIZE: int = 15
     FAILURE_ERROR_CHARS: int = 80
     CARD_ERROR_CHARS: int = 200
@@ -205,11 +212,12 @@ class SlackStatusBoard:
         self._started_wall = datetime.now(timezone.utc)
 
         self._lock = threading.RLock()
+        self._sending = False
         self._seq = 0
         self._next_update_at = 0.0
         self._ts: str | None = None
         self._thread_ts: list[str] = []
-        self._main_sent: Union[list, None] = None
+        self._main_sent: list | None = None
         self._thread_sent: list[list] = []
 
     # ------------------------------------------------------------------
@@ -251,19 +259,18 @@ class SlackStatusBoard:
             rec = self._records[definition_name]
             rec.statuses[action_val] = status
             now = time.monotonic()
-            if status == "running" and rec.started_at is None:
-                rec.started_at = now
-            if status in TERMINAL_STATUSES and self._classify(rec) not in (
-                "running",
-                "queued",
-            ):
-                rec.finished_at = now
+            if status == "running":
+                if rec.started_at is None:
+                    rec.started_at = now
+                rec.action_started[action_val] = now
+            elif status in TERMINAL_STATUSES and action_val in rec.action_started:
+                rec.work_secs += now - rec.action_started.pop(action_val)
 
     def record_result(
         self,
         definition_name: str,
         action: TerraformAction,
-        result: Optional["TerraformResult"],
+        result: Union["TerraformResult", None],
         failed: bool = False,
     ) -> None:
         """Capture plan/apply output details or an error snippet for a definition."""
@@ -273,7 +280,14 @@ class SlackStatusBoard:
             rec = self._records.get(definition_name)
             if rec is None:
                 return
-            text = _ANSI_RE.sub("", f"{result.stdout_str}\n{result.stderr_str}")
+            # errors="replace": providers can emit non-UTF-8 bytes, and a decode
+            # error here must not take down the run
+            text = _ANSI_RE.sub(
+                "",
+                result.stdout.decode(errors="replace")
+                + "\n"
+                + result.stderr.decode(errors="replace"),
+            )
             if failed:
                 rec.error_action = action.value
                 rec.error_snippet = self._extract_error(text)
@@ -293,6 +307,21 @@ class SlackStatusBoard:
                     rec.applied_changes = sum(
                         int(n) for n in _APPLY_COUNT_RE.findall(match.group(0))
                     )
+
+    def expects(self, action: TerraformAction) -> bool:
+        """Return True when the run is expected to perform the given action."""
+        return action.value in self._expected_actions
+
+    def finalize(self) -> None:
+        """Resolve statuses left pending/running as skipped (run over or aborted)."""
+        with self._lock:
+            for rec in self._records.values():
+                for action_val in self._expected_actions:
+                    if rec.statuses.get(action_val, "pending") in (
+                        "pending",
+                        "running",
+                    ):
+                        rec.statuses[action_val] = "skipped"
 
     @staticmethod
     def _extract_error(text: str) -> str:
@@ -440,12 +469,24 @@ class SlackStatusBoard:
             parts.append(f"finished in {self._elapsed_text()}")
         return " · ".join(parts)
 
+    def _outcome_counts(self, buckets: dict) -> tuple[int, int]:
+        """(definitions that did work, definitions skipped or without changes)."""
+        ok = [r for r in buckets["ok"] if not self._no_changes(r)]
+        skipped = len(buckets["ok"]) - len(ok) + len(buckets["skipped"])
+        return len(ok), skipped
+
     def _status_section(self, buckets: dict) -> dict:
-        _, ing, _ = self._nouns()
+        _, ing, past = self._nouns()
         total = len(self._records)
         overall = self.overall_status()
         if overall == "done":
-            text = f":white_check_mark: *Run complete — {total} definitions succeeded*"
+            # report real outcomes: teardown bulk-skips definitions an aborted
+            # run never reached, so "N definitions succeeded" would mislead
+            ok, skipped = self._outcome_counts(buckets)
+            text = f":white_check_mark: *Run complete — {ok} {past}"
+            if skipped:
+                text += f", {skipped} skipped"
+            text += "*"
         elif overall == "failed":
             failed = len(buckets["failed"])
             text = f":x: *Run failed — {failed} of {total} definitions errored*"
@@ -474,16 +515,14 @@ class SlackStatusBoard:
     def _counts_context(self, buckets: dict) -> dict:
         _, _, past = self._nouns()
         overall = self.overall_status()
-        ok = [r for r in buckets["ok"] if not self._no_changes(r)]
-        no_change = [r for r in buckets["ok"] if self._no_changes(r)]
-        skipped = len(buckets["skipped"]) + len(no_change)
+        ok, skipped = self._outcome_counts(buckets)
 
         elements: list[dict] = [
             {"type": "mrkdwn", "text": f"*{len(self._records)}* definitions"}
         ]
         if ok:
             elements.append(
-                {"type": "mrkdwn", "text": f":white_check_mark: *{len(ok)}* {past}"}
+                {"type": "mrkdwn", "text": f":white_check_mark: *{ok}* {past}"}
             )
         if buckets["failed"]:
             elements.append(
@@ -627,15 +666,24 @@ class SlackStatusBoard:
             task["sources"] = [
                 {
                     "type": "url",
-                    "url": template.format(definition=rec.name),
+                    # not str.format(): URLs legitimately contain braces, which
+                    # would raise and take down the run
+                    "url": template.replace("{definition}", rec.name),
                     "text": "full error in Datadog",
                 }
             ]
         return task
 
+    @staticmethod
+    def _name_list(recs: list[DefinitionRecord], cap: int = 10) -> str:
+        names = ", ".join(r.name for r in recs[:cap])
+        if len(recs) > cap:
+            names += ", …"
+        return names
+
     def _rollup_complete_task(self, buckets: dict) -> dict | None:
         _, _, past = self._nouns()
-        ok = [r for r in buckets["ok"] if not self._no_changes(r)]
+        ok, _ = self._outcome_counts(buckets)
         if not ok:
             return None
         changes = self._total_resource_changes()
@@ -647,7 +695,7 @@ class SlackStatusBoard:
         summary = f"{changes} {label}" if changes else "no resource changes"
         return {
             "task_id": "rollup_complete",
-            "title": f"{len(ok)} definitions {past} cleanly",
+            "title": f"{ok} definitions {past} cleanly",
             "status": "complete",
             "output": _rich_text(
                 [
@@ -677,9 +725,6 @@ class SlackStatusBoard:
                 "skipped"
             ]
             if no_change:
-                names = ", ".join(r.name for r in no_change[:10])
-                if len(no_change) > 10:
-                    names += ", …"
                 tasks.append(
                     {
                         "task_id": "rollup_skipped",
@@ -688,7 +733,9 @@ class SlackStatusBoard:
                             "no changes planned"
                         ),
                         "status": "complete",
-                        "details": _rich_text([{"type": "text", "text": names}]),
+                        "details": _rich_text(
+                            [{"type": "text", "text": self._name_list(no_change)}]
+                        ),
                     }
                 )
             stored = len([r for r in self._records.values() if r.planned_changes])
@@ -728,29 +775,30 @@ class SlackStatusBoard:
                 tasks.append(task)
             extra_running = running[self.MAX_NAMED_RUNNING :]
             if extra_running:
-                names = ", ".join(r.name for r in extra_running[:10])
-                if len(extra_running) > 10:
-                    names += ", …"
                 tasks.append(
                     {
                         "task_id": "rollup_running",
                         "title": f"…and {len(extra_running)} more {ing.lower()}",
                         "status": "in_progress",
-                        "details": _rich_text([{"type": "text", "text": names}]),
+                        "details": _rich_text(
+                            [{"type": "text", "text": self._name_list(extra_running)}]
+                        ),
                     }
                 )
             if buckets["queued"]:
                 queued = buckets["queued"]
-                names = ", ".join(r.name for r in queued[:3])
-                if len(queued) > 3:
-                    names += ", …"
                 tasks.append(
                     {
                         "task_id": "rollup_queued",
                         "title": f"{len(queued)} definitions queued",
                         "status": "pending",
                         "details": _rich_text(
-                            [{"type": "text", "text": f"next up: {names}"}]
+                            [
+                                {
+                                    "type": "text",
+                                    "text": f"next up: {self._name_list(queued, cap=3)}",
+                                }
+                            ]
                         ),
                     }
                 )
@@ -772,6 +820,15 @@ class SlackStatusBoard:
         if plan_block:
             blocks.append(plan_block)
         return blocks
+
+    @staticmethod
+    def _cell_chars(cell: dict) -> int:
+        if cell["type"] == "raw_text":
+            return len(cell["text"])
+        return sum(
+            len(el.get("text") or el.get("name") or "")
+            for el in cell["elements"][0]["elements"]
+        )
 
     def _status_cell(self, status: str) -> dict:
         if status == "skipped":
@@ -823,11 +880,24 @@ class SlackStatusBoard:
         caption = f"Per-definition results — {noun.lower()} {self._display_name()}" + (
             f" run {self._run_id}" if self._run_id else ""
         )
+        # chunk on both the 200-row limit and Slack's 20k-char aggregate cell
+        # limit per message (long definition names can hit chars before rows)
+        chunks: list[list[list[dict]]] = [[]]
+        chars = 0
+        for row in data_rows:
+            row_chars = sum(self._cell_chars(cell) for cell in row)
+            if chunks[-1] and (
+                len(chunks[-1]) >= self.MAX_DATA_TABLE_ROWS
+                or chars + row_chars > self.MAX_DATA_TABLE_CHARS
+            ):
+                chunks.append([])
+                chars = 0
+            chunks[-1].append(row)
+            chars += row_chars
+
         messages: list[list[dict]] = []
-        size = self.MAX_DATA_TABLE_ROWS
-        n_chunks = max(1, (len(data_rows) + size - 1) // size)
-        for i in range(n_chunks):
-            chunk = data_rows[i * size : (i + 1) * size]
+        n_chunks = len(chunks)
+        for i, chunk in enumerate(chunks):
             blocks: list[dict] = []
             if i == 0:
                 heading = (
@@ -859,13 +929,17 @@ class SlackStatusBoard:
         return messages
 
     def _fallback_text(self) -> str:
-        noun, _, _ = self._nouns()
+        noun, _, past = self._nouns()
         buckets = self._buckets()
         total = len(self._records)
         overall = self.overall_status()
         name = self._display_name()
         if overall == "done":
-            return f"{noun} {name}: complete — {total} definitions succeeded"
+            ok, skipped = self._outcome_counts(buckets)
+            text = f"{noun} {name}: complete — {ok} {past}"
+            if skipped:
+                text += f", {skipped} skipped"
+            return text
         if overall == "failed":
             failed = len(buckets["failed"])
             return f"{noun} {name}: failed — {failed} of {total} definitions errored"
@@ -899,7 +973,7 @@ class SlackStatusBoard:
         Non-forced calls drop the update on a 429 (the next flush resends the
         latest snapshot); forced (terminal) calls sleep and retry.
         """
-        attempts = 3 if force else 1
+        attempts = 5 if force else 1
         for attempt in range(attempts):
             try:
                 return method(**kwargs)
@@ -914,7 +988,12 @@ class SlackStatusBoard:
                 self._next_update_at = time.monotonic() + max(
                     retry_after, self._config.update_interval
                 )
-                log.warn(f"Slack rate limited; deferring update {retry_after}s")
+                if force:
+                    # a forced flush is usually the run's last; there is no
+                    # later call to pick up the deferral
+                    log.error("Slack rate limited; final status update was dropped")
+                else:
+                    log.warn(f"Slack rate limited; deferring update {retry_after}s")
                 return None
         return None
 
@@ -927,16 +1006,23 @@ class SlackStatusBoard:
         not changed are not re-sent.
         """
         with self._lock:
-            if not self._records:
-                return
             now = time.monotonic()
-            if not force and now < self._next_update_at:
+            # skip when debounced or another thread is mid-flush; its snapshot
+            # is stale but the next flush resends the latest state
+            if not force and (now < self._next_update_at or self._sending):
                 return
+            self._sending = True
             self._seq += 1
             fallback = self._fallback_text()
-
-            # 1) Channel message — the thread root.
+            final = self.overall_status() != "in_progress"
             main_blocks = self._build_main_blocks()
+            thread_messages = self._build_thread_messages()
+
+        # Slack calls happen outside the state lock so worker threads marking
+        # progress during parallel init are never blocked on network I/O;
+        # _sending keeps senders (and the message-tracking fields) exclusive.
+        try:
+            # 1) Channel message — the thread root.
             try:
                 if self._ts is None:
                     resp = self._call_api(
@@ -950,9 +1036,8 @@ class SlackStatusBoard:
                         self._ts = resp["ts"]
                         self._channel = resp["channel"]
                         self._main_sent = self._normalize_for_compare(main_blocks)
-                elif (
-                    self._normalize_for_compare(main_blocks) != self._main_sent
-                    or self.overall_status() != "in_progress"
+                elif self._normalize_for_compare(main_blocks) != self._main_sent or (
+                    final
                 ):
                     resp = self._call_api(
                         client.chat_update,
@@ -967,12 +1052,8 @@ class SlackStatusBoard:
             except Exception as e:
                 log.error(f"Slack API error updating run message: {e}")
 
-            # Without a channel message there is no thread; try again next call.
-            if self._ts is None:
-                return
-
-            # 2) Threaded per-definition table.
-            for i, blocks in enumerate(self._build_thread_messages()):
+            # 2) Threaded per-definition table (needs the thread root).
+            for i, blocks in enumerate(thread_messages if self._ts else []):
                 try:
                     if i < len(self._thread_ts):
                         if (
@@ -1006,12 +1087,16 @@ class SlackStatusBoard:
                             self._thread_sent.append(blocks)
                 except Exception as e:
                     log.error(f"Slack API error updating detail message {i + 1}: {e}")
-
-            # max() preserves a longer deferral set by a 429 Retry-After
-            self._next_update_at = max(
-                self._next_update_at,
-                time.monotonic() + self._config.update_interval,
-            )
+        finally:
+            with self._lock:
+                self._sending = False
+                # max() preserves a longer deferral set by a 429 Retry-After;
+                # advancing even on failure keeps the debounce engaged so a
+                # broken channel/token cannot turn every event into a retry
+                self._next_update_at = max(
+                    self._next_update_at,
+                    time.monotonic() + self._config.update_interval,
+                )
 
 
 @HandlerRegistry.register("slack")
@@ -1084,14 +1169,7 @@ class SlackHandler(BaseHandler):
     ) -> None:
         """Finalize the board; resolve any unfinished statuses."""
         try:
-            for rec in self._board._records.values():
-                for action_val in self._board._expected_actions:
-                    if rec.statuses.get(action_val, "pending") in (
-                        "pending",
-                        "running",
-                    ):
-                        rec.statuses[action_val] = "skipped"
-
+            self._board.finalize()
             self._board.post_or_update(self._client, force=True)
         except Exception as e:
             log.error(f"SlackHandler.teardown error: {e}")
@@ -1105,36 +1183,41 @@ class SlackHandler(BaseHandler):
         working_dir: str,
         result: Union["TerraformResult", None] = None,
     ) -> None:
-        self._board.ensure_definition(definition.name, deployment, working_dir)
+        # never let status reporting take down the run: exec_handlers callers
+        # only catch HandlerError, so anything raised here would propagate
+        try:
+            self._board.ensure_definition(definition.name, deployment, working_dir)
 
-        if stage == TerraformStage.PRE:
-            self._board.mark(definition.name, action, "running")
-            self._board.post_or_update(self._client)
+            if stage == TerraformStage.PRE:
+                self._board.mark(definition.name, action, "running")
+                self._board.post_or_update(self._client)
 
-        elif stage == TerraformStage.POST:
-            if result is None:
-                status = "failed"
-            elif result.exit_code == 0:
-                status = "done"
-            elif action == TerraformAction.PLAN and result.exit_code == 2:
-                status = "changes"
-            else:
-                status = "failed"
-            self._board.mark(definition.name, action, status)
-            self._board.record_result(
-                definition.name, action, result, failed=(status == "failed")
-            )
-            # a clean plan with no changes means apply will be skipped; mark it
-            # now so finished counts stay accurate during the run
-            if (
-                action == TerraformAction.PLAN
-                and status == "done"
-                and "apply" in self._board._expected_actions
-            ):
-                self._board.mark(definition.name, TerraformAction.APPLY, "skipped")
-            self._board.post_or_update(self._client)
+            elif stage == TerraformStage.POST:
+                if result is None:
+                    status = "failed"
+                elif result.exit_code == 0:
+                    status = "done"
+                elif action == TerraformAction.PLAN and result.exit_code == 2:
+                    status = "changes"
+                else:
+                    status = "failed"
+                self._board.mark(definition.name, action, status)
+                self._board.record_result(
+                    definition.name, action, result, failed=(status == "failed")
+                )
+                # a clean plan with no changes means apply will be skipped; mark
+                # it now so finished counts stay accurate during the run
+                if (
+                    action == TerraformAction.PLAN
+                    and status == "done"
+                    and self._board.expects(TerraformAction.APPLY)
+                ):
+                    self._board.mark(definition.name, TerraformAction.APPLY, "skipped")
+                self._board.post_or_update(self._client)
 
-        elif stage == TerraformStage.ERROR:
-            self._board.mark(definition.name, action, "failed")
-            self._board.record_result(definition.name, action, result, failed=True)
-            self._board.post_or_update(self._client)
+            elif stage == TerraformStage.ERROR:
+                self._board.mark(definition.name, action, "failed")
+                self._board.record_result(definition.name, action, result, failed=True)
+                self._board.post_or_update(self._client)
+        except Exception as e:
+            log.error(f"SlackHandler.execute error: {e}")
