@@ -108,16 +108,27 @@ class TestBoardState:
 
     def test_classification_buckets(self):
         board = make_board()
-        register(board, "queued", "running", "ok", "failed", "skipped")
+        register(board, "queued", "running", "ok", "no_changes", "failed", "skipped")
         board.mark("running", TerraformAction.INIT, "running")
         finish_ok(board, "ok")
+        finish_ok(board, "no_changes", changes=False)
         fail_def(board, "failed")
         for action in ("init", "plan", "apply"):
             board._records["skipped"].statuses[action] = "skipped"
 
         buckets = board._buckets()
-        for bucket in ("queued", "running", "ok", "failed", "skipped"):
+        for bucket in ("queued", "running", "ok", "no_changes", "failed", "skipped"):
             assert [r.name for r in buckets[bucket]] == [bucket]
+
+    def test_aborted_definition_is_skipped_not_no_changes(self):
+        # init ran but plan never did (aborted run resolved by teardown):
+        # the plan didn't find "no changes" — it didn't run
+        board = make_board()
+        register(board, "aborted")
+        board.mark("aborted", TerraformAction.INIT, "done")
+        board._records["aborted"].statuses["plan"] = "skipped"
+        board._records["aborted"].statuses["apply"] = "skipped"
+        assert board._classify(board._records["aborted"]) == "skipped"
 
     def test_overall_status_transitions(self):
         board = make_board()
@@ -295,11 +306,14 @@ class TestMainBlocks:
         assert "has_header_divider" not in container
         assert "finished in" in container["subtitle"]["text"]
         verdict = container["child_blocks"][0]["text"]["text"]
-        assert "Run complete — 1 applied, 1 skipped" in verdict
+        assert "Run complete — 1 applied, 1 no changes" in verdict
 
         assert all(t["status"] == "complete" for t in plan["tasks"])
-        skipped = next(t for t in plan["tasks"] if t["task_id"] == "rollup_skipped")
-        assert "1 definitions skipped" in skipped["title"]
+        no_changes = next(
+            t for t in plan["tasks"] if t["task_id"] == "rollup_no_changes"
+        )
+        assert "1 definitions with no changes" in no_changes["title"]
+        assert not any(t["task_id"] == "rollup_skipped" for t in plan["tasks"])
 
     def test_failed_final_layout(self):
         board = make_board()
@@ -439,7 +453,7 @@ class TestThreadMessages:
             "Plan",
             "Apply",
             "Changed",
-            "Secs",
+            "Ran (s)",
         ]
         row = table["rows"][1]
         assert rich_text(row[0]) == "vpc"

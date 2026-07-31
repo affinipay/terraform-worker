@@ -377,21 +377,36 @@ class SlackStatusBoard:
     # classification / aggregation
     # ------------------------------------------------------------------
     def _classify(self, rec: DefinitionRecord) -> str:
-        """Classify a definition as failed, running, ok, skipped, or queued."""
+        """Classify a definition as failed, running, ok, no_changes, skipped, or queued.
+
+        "no_changes" means the plan ran and found nothing to do; "skipped" is
+        reserved for definitions whose work never ran at all (e.g. an aborted
+        run resolved by teardown) — conflating them would misreport clean
+        plans as not having run.
+        """
         vals = [rec.statuses.get(a, "pending") for a in self._expected_actions]
         if "failed" in vals:
             return "failed"
         if "running" in vals:
             return "running"
-        if vals and all(v in TERMINAL_STATUSES for v in vals):
-            return "skipped" if all(v == "skipped" for v in vals) else "ok"
-        return "queued"
+        if not (vals and all(v in TERMINAL_STATUSES for v in vals)):
+            return "queued"
+        if all(v == "skipped" for v in vals):
+            return "skipped"
+        if "plan" in self._expected_actions and rec.statuses.get("plan") == "skipped":
+            return "skipped"
+        if not rec.applied_changes and (
+            rec.planned_changes == 0 or rec.statuses.get("apply") == "skipped"
+        ):
+            return "no_changes"
+        return "ok"
 
     def _buckets(self) -> dict[str, list[DefinitionRecord]]:
         buckets: dict[str, list[DefinitionRecord]] = {
             "failed": [],
             "running": [],
             "ok": [],
+            "no_changes": [],
             "skipped": [],
             "queued": [],
         }
@@ -399,13 +414,6 @@ class SlackStatusBoard:
             buckets[self._classify(rec)].append(rec)
         buckets["running"].sort(key=lambda r: r.started_at or 0.0)
         return buckets
-
-    @staticmethod
-    def _no_changes(rec: DefinitionRecord) -> bool:
-        """True when a finished definition made (and planned) no changes."""
-        if rec.applied_changes:
-            return False
-        return rec.planned_changes == 0 or rec.statuses.get("apply") == "skipped"
 
     def is_terminal(self) -> bool:
         """Return True when no definition remains queued or running."""
@@ -469,12 +477,6 @@ class SlackStatusBoard:
             parts.append(f"finished in {self._elapsed_text()}")
         return " · ".join(parts)
 
-    def _outcome_counts(self, buckets: dict) -> tuple[int, int]:
-        """(definitions that did work, definitions skipped or without changes)."""
-        ok = [r for r in buckets["ok"] if not self._no_changes(r)]
-        skipped = len(buckets["ok"]) - len(ok) + len(buckets["skipped"])
-        return len(ok), skipped
-
     def _status_section(self, buckets: dict) -> dict:
         _, ing, past = self._nouns()
         total = len(self._records)
@@ -482,17 +484,21 @@ class SlackStatusBoard:
         if overall == "done":
             # report real outcomes: teardown bulk-skips definitions an aborted
             # run never reached, so "N definitions succeeded" would mislead
-            ok, skipped = self._outcome_counts(buckets)
-            text = f":white_check_mark: *Run complete — {ok} {past}"
-            if skipped:
-                text += f", {skipped} skipped"
-            text += "*"
+            parts = [f"{len(buckets['ok'])} {past}"]
+            if buckets["no_changes"]:
+                parts.append(f"{len(buckets['no_changes'])} no changes")
+            if buckets["skipped"]:
+                parts.append(f"{len(buckets['skipped'])} skipped")
+            text = f":white_check_mark: *Run complete — {', '.join(parts)}*"
         elif overall == "failed":
             failed = len(buckets["failed"])
             text = f":x: *Run failed — {failed} of {total} definitions errored*"
         else:
             finished = (
-                len(buckets["failed"]) + len(buckets["ok"]) + len(buckets["skipped"])
+                len(buckets["failed"])
+                + len(buckets["ok"])
+                + len(buckets["no_changes"])
+                + len(buckets["skipped"])
             )
             running = len(buckets["running"])
             if running:
@@ -515,14 +521,16 @@ class SlackStatusBoard:
     def _counts_context(self, buckets: dict) -> dict:
         _, _, past = self._nouns()
         overall = self.overall_status()
-        ok, skipped = self._outcome_counts(buckets)
 
         elements: list[dict] = [
             {"type": "mrkdwn", "text": f"*{len(self._records)}* definitions"}
         ]
-        if ok:
+        if buckets["ok"]:
             elements.append(
-                {"type": "mrkdwn", "text": f":white_check_mark: *{ok}* {past}"}
+                {
+                    "type": "mrkdwn",
+                    "text": f":white_check_mark: *{len(buckets['ok'])}* {past}",
+                }
             )
         if buckets["failed"]:
             elements.append(
@@ -543,9 +551,19 @@ class SlackStatusBoard:
                         "text": f":hourglass: *{len(buckets['queued'])}* queued",
                     }
                 )
-        if skipped:
+        if buckets["no_changes"]:
             elements.append(
-                {"type": "mrkdwn", "text": f":fast_forward: *{skipped}* skipped"}
+                {
+                    "type": "mrkdwn",
+                    "text": f":heavy_minus_sign: *{len(buckets['no_changes'])}* no changes",
+                }
+            )
+        if buckets["skipped"]:
+            elements.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f":fast_forward: *{len(buckets['skipped'])}* skipped",
+                }
             )
         if overall != "in_progress":
             changes = self._total_resource_changes()
@@ -683,7 +701,7 @@ class SlackStatusBoard:
 
     def _rollup_complete_task(self, buckets: dict) -> dict | None:
         _, _, past = self._nouns()
-        ok, _ = self._outcome_counts(buckets)
+        ok = len(buckets["ok"])
         if not ok:
             return None
         changes = self._total_resource_changes()
@@ -721,20 +739,38 @@ class SlackStatusBoard:
             tasks.append(rollup)
 
         if overall == "done":
-            no_change = [r for r in buckets["ok"] if self._no_changes(r)] + buckets[
-                "skipped"
-            ]
-            if no_change:
+            if buckets["no_changes"]:
                 tasks.append(
                     {
-                        "task_id": "rollup_skipped",
+                        "task_id": "rollup_no_changes",
                         "title": (
-                            f"{len(no_change)} definitions skipped — "
-                            "no changes planned"
+                            f"{len(buckets['no_changes'])} definitions with "
+                            "no changes"
                         ),
                         "status": "complete",
                         "details": _rich_text(
-                            [{"type": "text", "text": self._name_list(no_change)}]
+                            [
+                                {
+                                    "type": "text",
+                                    "text": self._name_list(buckets["no_changes"]),
+                                }
+                            ]
+                        ),
+                    }
+                )
+            if buckets["skipped"]:
+                tasks.append(
+                    {
+                        "task_id": "rollup_skipped",
+                        "title": f"{len(buckets['skipped'])} definitions skipped — not run",
+                        "status": "complete",
+                        "details": _rich_text(
+                            [
+                                {
+                                    "type": "text",
+                                    "text": self._name_list(buckets["skipped"]),
+                                }
+                            ]
                         ),
                     }
                 )
@@ -849,7 +885,7 @@ class SlackStatusBoard:
         ]
         header += [
             {"type": "raw_text", "text": "Changed"},
-            {"type": "raw_text", "text": "Secs"},
+            {"type": "raw_text", "text": "Ran (s)"},
         ]
 
         data_rows: list[list[dict]] = []
@@ -873,7 +909,10 @@ class SlackStatusBoard:
             )
             duration = rec.duration_secs()
             row.append(
-                {"type": "raw_text", "text": "—" if duration is None else str(duration)}
+                {
+                    "type": "raw_text",
+                    "text": "—" if duration is None else f"{duration}s",
+                }
             )
             data_rows.append(row)
 
@@ -935,15 +974,21 @@ class SlackStatusBoard:
         overall = self.overall_status()
         name = self._display_name()
         if overall == "done":
-            ok, skipped = self._outcome_counts(buckets)
-            text = f"{noun} {name}: complete — {ok} {past}"
-            if skipped:
-                text += f", {skipped} skipped"
-            return text
+            parts = [f"{len(buckets['ok'])} {past}"]
+            if buckets["no_changes"]:
+                parts.append(f"{len(buckets['no_changes'])} no changes")
+            if buckets["skipped"]:
+                parts.append(f"{len(buckets['skipped'])} skipped")
+            return f"{noun} {name}: complete — {', '.join(parts)}"
         if overall == "failed":
             failed = len(buckets["failed"])
             return f"{noun} {name}: failed — {failed} of {total} definitions errored"
-        finished = len(buckets["failed"]) + len(buckets["ok"]) + len(buckets["skipped"])
+        finished = (
+            len(buckets["failed"])
+            + len(buckets["ok"])
+            + len(buckets["no_changes"])
+            + len(buckets["skipped"])
+        )
         text = f"{noun} {name}: in progress — {finished} of {total} finished"
         if buckets["failed"]:
             text += f", {len(buckets['failed'])} failed"
