@@ -384,6 +384,17 @@ class TestPlanBlock:
         queued = next(t for t in plan["tasks"] if t["task_id"] == "rollup_queued")
         assert "1 definitions queued" in queued["title"]
 
+    def test_no_changes_rollup_shown_mid_run(self):
+        board = make_board()
+        register(board, "clean", "busy")
+        finish_ok(board, "clean", changes=False)
+        board.mark("busy", TerraformAction.INIT, "running")
+        plan = board._build_main_blocks()[1]
+        no_changes = next(
+            t for t in plan["tasks"] if t["task_id"] == "rollup_no_changes"
+        )
+        assert "1 definitions with no changes" in no_changes["title"]
+
     def test_running_verb_follows_actual_action(self):
         board = make_board()
         register(board, "a", "b")

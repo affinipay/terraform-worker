@@ -778,27 +778,28 @@ class SlackStatusBoard:
         rollup = self._rollup_complete_task(buckets)
         if rollup:
             tasks.append(rollup)
+        # shown while running too: clean finishes are completed work, and on
+        # an all-clean run this is otherwise the feed's only sign of progress
+        if buckets["no_changes"]:
+            tasks.append(
+                {
+                    "task_id": "rollup_no_changes",
+                    "title": (
+                        f"{len(buckets['no_changes'])} definitions with no changes"
+                    ),
+                    "status": "complete",
+                    "details": _rich_text(
+                        [
+                            {
+                                "type": "text",
+                                "text": self._name_list(buckets["no_changes"]),
+                            }
+                        ]
+                    ),
+                }
+            )
 
         if overall == "done":
-            if buckets["no_changes"]:
-                tasks.append(
-                    {
-                        "task_id": "rollup_no_changes",
-                        "title": (
-                            f"{len(buckets['no_changes'])} definitions with "
-                            "no changes"
-                        ),
-                        "status": "complete",
-                        "details": _rich_text(
-                            [
-                                {
-                                    "type": "text",
-                                    "text": self._name_list(buckets["no_changes"]),
-                                }
-                            ]
-                        ),
-                    }
-                )
             if buckets["skipped"]:
                 tasks.append(
                     {
