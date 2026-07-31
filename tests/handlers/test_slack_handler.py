@@ -338,13 +338,14 @@ class TestMainBlocks:
 
 
 class TestPlanBlock:
-    def test_fresh_block_id_per_update(self):
+    def test_stable_block_id_across_updates(self):
+        # a fresh block_id per update would reset the block's
+        # expanded/collapsed state under a watching user
         board = make_board()
         register(board, "a")
-        board._seq = 1
         first = board._build_main_blocks()[1]["block_id"]
-        board._seq = 2
-        assert first != board._build_main_blocks()[1]["block_id"]
+        board.mark("a", TerraformAction.INIT, "running")
+        assert board._build_main_blocks()[1]["block_id"] == first
 
     def test_error_cards_capped_with_datadog_sources(self):
         # the literal braces in the template must not raise (str.format would)
@@ -375,10 +376,24 @@ class TestPlanBlock:
         named = [t for t in plan["tasks"] if t["task_id"].startswith("run_")]
         assert len(named) == board.MAX_NAMED_RUNNING
         assert named[0]["task_id"] == "run_def3"
+        # verbs follow the action actually running (init here), not the
+        # run's primary verb ("applying")
+        assert named[0]["title"].endswith("— initializing")
         rollup = next(t for t in plan["tasks"] if t["task_id"] == "rollup_running")
-        assert "3 more" in rollup["title"]
+        assert "3 more initializing" in rollup["title"]
         queued = next(t for t in plan["tasks"] if t["task_id"] == "rollup_queued")
         assert "1 definitions queued" in queued["title"]
+
+    def test_running_verb_follows_actual_action(self):
+        board = make_board()
+        register(board, "a", "b")
+        board.mark("a", TerraformAction.INIT, "running")
+        status = board._build_main_blocks()[0]["child_blocks"][0]["text"]["text"]
+        assert "*Initializing*" in status
+        board.mark("a", TerraformAction.INIT, "done")
+        board.mark("a", TerraformAction.APPLY, "running")
+        status = board._build_main_blocks()[0]["child_blocks"][0]["text"]["text"]
+        assert "*Applying*" in status
 
     def test_running_task_shows_plan_line(self):
         board = make_board()

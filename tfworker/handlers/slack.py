@@ -29,7 +29,8 @@ Notes on Slack API behavior this module encodes (all confirmed live):
 - ``has_header_divider`` and ``is_collapsible`` on a container are mutually
   exclusive at post/update time.
 - ``data_table`` cells reject ``raw_number``; numeric columns use ``raw_text``.
-- ``plan`` blocks should get a fresh ``block_id`` on every ``chat.update``.
+- ``plan`` blocks keep a stable ``block_id`` across updates: a fresh id makes
+  Slack treat the block as new and reset its expanded/collapsed state.
 - ``blocks.validate`` accepts payloads the message APIs reject; only real
   ``chat.postMessage``/``chat.update`` calls prove a payload.
 - The bot token only has ``chat:write``/``chat:write.public`` so every posted
@@ -217,7 +218,6 @@ class SlackStatusBoard:
 
         self._lock = threading.RLock()
         self._sending = False
-        self._seq = 0
         self._next_update_at = 0.0
         self._ts: str | None = None
         self._thread_ts: list[str] = []
@@ -424,6 +424,24 @@ class SlackStatusBoard:
             return "no_changes"
         return "ok"
 
+    @staticmethod
+    def _running_action(rec: DefinitionRecord) -> str | None:
+        for action_val in rec.expected:
+            if rec.statuses.get(action_val) == "running":
+                return action_val
+        return None
+
+    def _running_verb(self, recs: list[DefinitionRecord]) -> str:
+        """Verb for what these definitions are actually doing right now.
+
+        The run's primary verb would be wrong here: during the parallel init
+        phase a plan run would label everything "planning".
+        """
+        actions = {self._running_action(r) for r in recs} - {None}
+        if len(actions) == 1:
+            return self.ACTION_NOUNS[actions.pop()][1].lower()
+        return "running"
+
     def _buckets(self) -> dict[str, list[DefinitionRecord]]:
         buckets: dict[str, list[DefinitionRecord]] = {
             "failed": [],
@@ -525,8 +543,9 @@ class SlackStatusBoard:
             )
             running = len(buckets["running"])
             if running:
+                phase = self._running_verb(buckets["running"]).capitalize()
                 text = (
-                    f":arrows_counterclockwise: *{ing}* — {running} "
+                    f":arrows_counterclockwise: *{phase}* — {running} "
                     f"definition{'s' if running != 1 else ''} running · "
                     f"{finished} of {total} finished"
                 )
@@ -754,7 +773,6 @@ class SlackStatusBoard:
             # final failures live in the container's table instead
             return None
 
-        _, ing, _ = self._nouns()
         tasks: list[dict] = []
 
         rollup = self._rollup_complete_task(buckets)
@@ -824,7 +842,7 @@ class SlackStatusBoard:
             for rec in running[: self.MAX_NAMED_RUNNING]:
                 task: dict = {
                     "task_id": f"run_{rec.name}",
-                    "title": f"{rec.name} — {ing.lower()}",
+                    "title": f"{rec.name} — {self._running_verb([rec])}",
                     "status": "in_progress",
                 }
                 if rec.plan_line:
@@ -837,7 +855,10 @@ class SlackStatusBoard:
                 tasks.append(
                     {
                         "task_id": "rollup_running",
-                        "title": f"…and {len(extra_running)} more {ing.lower()}",
+                        "title": (
+                            f"…and {len(extra_running)} more "
+                            f"{self._running_verb(extra_running)}"
+                        ),
                         "status": "in_progress",
                         "details": _rich_text(
                             [{"type": "text", "text": self._name_list(extra_running)}]
@@ -866,8 +887,10 @@ class SlackStatusBoard:
             return None
         return {
             "type": "plan",
-            # Slack recommends a fresh block_id for plan blocks on every update
-            "block_id": f"{self._run_key()}_plan_v{self._seq}",
+            # stable block_id: a fresh one per update makes Slack treat the
+            # block as new and reset its expanded/collapsed state, collapsing
+            # the feed under a watching user
+            "block_id": f"{self._run_key()}_plan",
             "title": "Run progress",
             "tasks": tasks,
         }
@@ -1034,13 +1057,11 @@ class SlackStatusBoard:
     def _normalize_for_compare(blocks: list[dict]) -> list[dict]:
         """Blocks minus volatile fields, so no-op updates can be skipped.
 
-        The plan block gets a fresh block_id each update and the subtitle
-        carries an "updated HH:MM" clock; neither should force a send.
+        The container subtitle carries an "updated HH:MM" clock, which alone
+        should not force a send.
         """
         normalized = copy.deepcopy(blocks)
         for block in normalized:
-            if block.get("type") == "plan":
-                block["block_id"] = "PLAN"
             if block.get("type") == "container" and "subtitle" in block:
                 block["subtitle"] = {}
         return normalized
@@ -1090,7 +1111,6 @@ class SlackStatusBoard:
             if not force and (now < self._next_update_at or self._sending):
                 return
             self._sending = True
-            self._seq += 1
             fallback = self._fallback_text()
             final = self.overall_status() != "in_progress"
             main_blocks = self._build_main_blocks()
