@@ -71,6 +71,9 @@ class SlackStatusBoard:
         "skipped": "—",
     }
     ACTION_ORDER: list[str] = ["init", "plan", "apply", "destroy"]
+    # Slack allows at most 50 blocks per message; keep detail rows well under it.
+    MAX_BLOCKS: int = 50
+    DETAIL_ROWS_PER_MSG: int = 45
 
     def __init__(self, channel: str, title: str | None, run_id: str | None):
         self._ts: str | None = None
@@ -81,6 +84,12 @@ class SlackStatusBoard:
         self._run_id = run_id
         self._title = title
         self._git_context: str | None = None
+        # Parent (summary) message ts is `_ts`; threaded detail messages are
+        # `_detail_ts`. We cache the last blocks sent for each so repeated
+        # post_or_update calls skip no-op Slack updates.
+        self._detail_ts: list[str] = []
+        self._parent_blocks_sent: Union[list, None] = None
+        self._detail_blocks_sent: list[list] = []
 
     def ensure_definition(
         self, definition_name: str, deployment: str, working_dir: str
@@ -183,11 +192,35 @@ class SlackStatusBoard:
             parts.append(f"Commit: {commit}")
         return "  ".join(parts) if parts else None
 
-    def _build_blocks(self) -> list[dict]:
-        """Build Slack Block Kit payload for the current status board state."""
+    def _status_counts(self) -> dict[str, int]:
+        """Count definition+action pairs by status across all seen actions."""
+        counts: dict[str, int] = {}
+        for action_statuses in self._statuses.values():
+            for action_val in self._seen_actions:
+                st = action_statuses.get(action_val, "pending")
+                counts[st] = counts.get(st, 0) + 1
+        return counts
+
+    def _banner(self) -> str:
+        """Overall status banner text."""
+        overall = self.overall_status()
+        if overall == "in_progress":
+            return "🟡  *In progress*"
+        if overall == "done":
+            skipped = self.skipped_count()
+            if skipped:
+                return f"✅  *Run complete — {skipped} action(s) skipped*"
+            return "✅  *Run complete — all definitions succeeded*"
+        return f"❌  *Run failed — {self.failed_count()} action(s) errored*"
+
+    def _build_summary_blocks(self) -> list[dict]:
+        """Compact parent-message blocks: header, git context, banner, counts.
+
+        Kept well under Slack's 50-block limit; the per-definition table lives in
+        threaded detail messages (see _build_detail_chunks).
+        """
         blocks: list[dict] = []
 
-        # Header block
         title = self._title or self._deployment or "Terraform run"
         header_text = f"🏗️  {title}"
         if self._run_id:
@@ -199,7 +232,6 @@ class SlackStatusBoard:
             }
         )
 
-        # Git context block (omitted when unavailable)
         if self._git_context:
             blocks.append(
                 {
@@ -208,19 +240,64 @@ class SlackStatusBoard:
                 }
             )
 
-        # Status table using 2-column fields layout (left = name, right = emoji row)
-        if self._seen_actions and self._statuses:
-            action_labels = "  ".join(f"*{a.capitalize()}*" for a in self._seen_actions)
-            blocks.append(
-                {
-                    "type": "section",
-                    "fields": [
-                        {"type": "mrkdwn", "text": "*Definition*"},
-                        {"type": "mrkdwn", "text": action_labels},
-                    ],
-                }
-            )
-            for def_name, action_statuses in self._statuses.items():
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": self._banner()}}
+        )
+
+        counts = self._status_counts()
+        order = [
+            ("running", "🔄"),
+            ("pending", "⏳"),
+            ("changes", "🔵"),
+            ("done", "✅"),
+            ("failed", "❌"),
+            ("skipped", "—"),
+        ]
+        tallies = "  ".join(f"{emoji} {counts[k]}" for k, emoji in order if counts.get(k))
+        summary = f"*{len(self._statuses)}* definition(s)"
+        if tallies:
+            summary += f"   |   {tallies}"
+        summary += "   ·   🧵 per-definition status in thread"
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": summary}]}
+        )
+
+        return blocks
+
+    def _build_detail_chunks(self) -> list[list[dict]]:
+        """Per-definition status table, split into thread messages under the block limit.
+
+        Each chunk is one threaded message: a context header + the column header +
+        up to DETAIL_ROWS_PER_MSG definition rows (<= MAX_BLOCKS blocks total).
+        """
+        if not (self._seen_actions and self._statuses):
+            return []
+
+        action_labels = "  ".join(f"*{a.capitalize()}*" for a in self._seen_actions)
+        header_field = {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": "*Definition*"},
+                {"type": "mrkdwn", "text": action_labels},
+            ],
+        }
+
+        items = list(self._statuses.items())
+        total = len(items)
+        rows = self.DETAIL_ROWS_PER_MSG
+        n_chunks = max(1, (total + rows - 1) // rows)
+
+        chunks: list[list[dict]] = []
+        for i in range(n_chunks):
+            start, end = i * rows, min((i + 1) * rows, total)
+            label = f"Definitions {start + 1}–{end} of {total}"
+            if n_chunks > 1:
+                label += f"   (part {i + 1}/{n_chunks})"
+            blocks: list[dict] = [
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": label}]},
+                header_field,
+            ]
+            for def_name, action_statuses in items[start:end]:
                 emoji_row = "  ".join(
                     self.STATUS_EMOJI.get(
                         action_statuses.get(action_val, "pending"), "❓"
@@ -236,49 +313,73 @@ class SlackStatusBoard:
                         ],
                     }
                 )
-
-        # Divider
-        blocks.append({"type": "divider"})
-
-        # Overall status banner
-        overall = self.overall_status()
-        if overall == "in_progress":
-            banner = "🟡  *In progress*"
-        elif overall == "done":
-            skipped = self.skipped_count()
-            if skipped:
-                banner = f"✅  *Run complete — {skipped} action(s) skipped*"
-            else:
-                banner = "✅  *Run complete — all definitions succeeded*"
-        else:
-            failed = self.failed_count()
-            banner = f"❌  *Run failed — {failed} action(s) errored*"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": banner}})
-
-        return blocks
+            chunks.append(blocks)
+        return chunks
 
     def post_or_update(self, client: WebClient) -> None:
-        """Post the status board as a new message, or update the existing one."""
-        blocks = self._build_blocks()
+        """Post/refresh the parent summary message and its threaded detail messages.
+
+        The board is split across messages to stay under Slack's 50-block limit:
+        a compact parent (summary) message is the thread root, and the
+        per-definition table is posted as one or more threaded replies. Messages
+        whose blocks haven't changed since the last call are not re-sent.
+        """
         fallback_text = f"Terraform run: {self._deployment or 'unknown'}"
+
+        # 1) Parent (summary) message — the thread root.
+        summary_blocks = self._build_summary_blocks()
         try:
             if self._ts is None:
                 resp = client.chat_postMessage(
-                    channel=self._channel,
-                    blocks=blocks,
-                    text=fallback_text,
+                    channel=self._channel, blocks=summary_blocks, text=fallback_text
                 )
                 self._ts = resp["ts"]
                 self._channel = resp["channel"]
-            else:
+                self._parent_blocks_sent = summary_blocks
+            elif summary_blocks != self._parent_blocks_sent:
                 client.chat_update(
                     channel=self._channel,
                     ts=self._ts,
-                    blocks=blocks,
+                    blocks=summary_blocks,
                     text=fallback_text,
                 )
+                self._parent_blocks_sent = summary_blocks
         except Exception as e:
-            log.error(f"Slack API error in post_or_update: {e}")
+            log.error(f"Slack API error updating summary message: {e}")
+
+        # Without a parent message we can't create the thread; try again next call.
+        if self._ts is None:
+            return
+
+        # 2) Threaded detail messages, chunked under the block limit.
+        for i, blocks in enumerate(self._build_detail_chunks()):
+            try:
+                if i < len(self._detail_ts):
+                    if (
+                        i < len(self._detail_blocks_sent)
+                        and blocks == self._detail_blocks_sent[i]
+                    ):
+                        continue  # unchanged; skip the API call
+                    client.chat_update(
+                        channel=self._channel,
+                        ts=self._detail_ts[i],
+                        blocks=blocks,
+                        text=fallback_text,
+                    )
+                    while len(self._detail_blocks_sent) <= i:
+                        self._detail_blocks_sent.append(None)
+                    self._detail_blocks_sent[i] = blocks
+                else:
+                    resp = client.chat_postMessage(
+                        channel=self._channel,
+                        thread_ts=self._ts,
+                        blocks=blocks,
+                        text=fallback_text,
+                    )
+                    self._detail_ts.append(resp["ts"])
+                    self._detail_blocks_sent.append(blocks)
+            except Exception as e:
+                log.error(f"Slack API error updating detail message {i + 1}: {e}")
 
 
 @HandlerRegistry.register("slack")

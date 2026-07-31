@@ -234,7 +234,9 @@ class TestSlackStatusBoardGitContext:
         assert result is None
 
 
-class TestSlackStatusBoardBlocks:
+class TestSlackStatusBoardSummary:
+    """The compact parent message: header, git context, banner, counts."""
+
     def _make_board(self, title=None, run_id=None):
         from tfworker.handlers.slack import SlackStatusBoard
 
@@ -242,176 +244,178 @@ class TestSlackStatusBoardBlocks:
         b._deployment = "prod"
         return b
 
-    def test_blocks_is_list(self):
+    def test_summary_is_list(self):
         board = self._make_board()
         board.ensure_definition("vpc", "prod", "/tmp")
         board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
+        blocks = board._build_summary_blocks()
         assert isinstance(blocks, list)
         assert len(blocks) >= 1
 
     def test_header_block_contains_deployment(self):
         board = self._make_board()
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        header = blocks[0]
+        header = board._build_summary_blocks()[0]
         assert header["type"] == "header"
         assert "prod" in header["text"]["text"]
 
     def test_header_uses_title_when_set(self):
         board = self._make_board(title="My Run")
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        assert "My Run" in blocks[0]["text"]["text"]
+        assert "My Run" in board._build_summary_blocks()[0]["text"]["text"]
 
     def test_header_includes_run_id(self):
         board = self._make_board(run_id="run-42")
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        assert "run-42" in blocks[0]["text"]["text"]
+        assert "run-42" in board._build_summary_blocks()[0]["text"]["text"]
 
-    def test_git_context_block_present_when_available(self):
+    def test_git_context_present_when_available(self):
         board = self._make_board()
         board._git_context = "Branch: main  Commit: abc1234"
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        context_texts = [str(b) for b in blocks if b.get("type") == "context"]
-        assert any("main" in t for t in context_texts)
-
-    def test_status_table_contains_definition_name(self):
-        board = self._make_board()
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "vpc" in all_text
-
-    def test_status_table_contains_action_column(self):
-        board = self._make_board()
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "Plan" in all_text or "plan" in all_text
+        blocks = board._build_summary_blocks()
+        assert any(b.get("type") == "context" and "main" in str(b) for b in blocks)
 
     def test_banner_in_progress(self):
         board = self._make_board()
         board.ensure_definition("vpc", "prod", "/tmp")
         board.mark("vpc", TerraformAction.PLAN, "running")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "🟡" in all_text
+        assert "🟡" in str(board._build_summary_blocks())
 
     def test_banner_done(self):
         board = self._make_board()
         board.ensure_definition("vpc", "prod", "/tmp")
         board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "✅" in all_text
+        assert "✅" in str(board._build_summary_blocks())
 
     def test_banner_failed(self):
         board = self._make_board()
         board.ensure_definition("vpc", "prod", "/tmp")
         board.mark("vpc", TerraformAction.PLAN, "failed")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "❌" in all_text
+        assert "❌" in str(board._build_summary_blocks())
 
     def test_banner_done_with_skips(self):
         board = self._make_board()
         board.ensure_definition("vpc", "prod", "/tmp")
         board.mark("vpc", TerraformAction.INIT, "done")
         board.mark("vpc", TerraformAction.PLAN, "skipped")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "✅" in all_text
-        assert "skipped" in all_text
+        text = str(board._build_summary_blocks())
+        assert "✅" in text
+        assert "skipped" in text
 
     def test_banner_done_no_skips(self):
         board = self._make_board()
         board.ensure_definition("vpc", "prod", "/tmp")
         board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "succeeded" in all_text
-        assert "skipped" not in all_text
+        assert "succeeded" in str(board._build_summary_blocks())
 
-    def test_only_observed_actions_as_columns(self):
-        """A plan-only run shows Init and Plan columns only."""
-        board = self._make_board()
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.INIT, "done")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        all_text = str(blocks)
-        assert "Apply" not in all_text
-        assert "Destroy" not in all_text
-
-    def test_status_table_uses_fields_layout(self):
-        """Table rows are rendered as section blocks with fields, not tab-separated text."""
-        board = self._make_board()
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        fields_sections = [
-            b for b in blocks if b.get("type") == "section" and "fields" in b
-        ]
-        assert len(fields_sections) >= 2  # header row + at least one definition row
-
-    def test_status_table_header_fields_structure(self):
-        """Header row has exactly 2 fields: Definition label and action labels."""
-        board = self._make_board()
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        fields_sections = [
-            b for b in blocks if b.get("type") == "section" and "fields" in b
-        ]
-        header = fields_sections[0]
-        assert len(header["fields"]) == 2
-        assert header["fields"][0]["text"] == "*Definition*"
-        assert "*Plan*" in header["fields"][1]["text"]
-
-    def test_status_table_definition_row_structure(self):
-        """Definition rows have name on left, emoji string on right."""
-        board = self._make_board()
-        board.ensure_definition("vpc", "prod", "/tmp")
-        board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        fields_sections = [
-            b for b in blocks if b.get("type") == "section" and "fields" in b
-        ]
-        def_row = fields_sections[1]
-        assert len(def_row["fields"]) == 2
-        assert "`vpc`" in def_row["fields"][0]["text"]
-        assert "✅" in def_row["fields"][1]["text"]
-
-    def test_multiple_definitions_produce_multiple_rows(self):
-        """Multiple definitions produce one section+fields block each."""
+    def test_summary_includes_definition_count(self):
         board = self._make_board()
         for name in ["vpc", "eks", "rds"]:
             board.ensure_definition(name, "prod", "/tmp")
             board.mark(name, TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        fields_sections = [
-            b for b in blocks if b.get("type") == "section" and "fields" in b
-        ]
-        assert len(fields_sections) == 4  # 1 header + 3 definition rows
+        assert "3" in str(board._build_summary_blocks())
 
-    def test_table_section_blocks_have_no_text_key(self):
-        """Table section blocks use 'fields', not a top-level 'text' key."""
+    def test_summary_points_to_thread(self):
         board = self._make_board()
         board.ensure_definition("vpc", "prod", "/tmp")
         board.mark("vpc", TerraformAction.PLAN, "done")
-        blocks = board._build_blocks()
-        for block in blocks:
+        assert "thread" in str(board._build_summary_blocks()).lower()
+
+
+class TestSlackStatusBoardDetail:
+    """The threaded per-definition table, chunked under Slack's block limit."""
+
+    def _make_board(self, title=None, run_id=None):
+        from tfworker.handlers.slack import SlackStatusBoard
+
+        b = SlackStatusBoard(channel="#ops", title=title, run_id=run_id)
+        b._deployment = "prod"
+        return b
+
+    def test_detail_contains_definition_name(self):
+        board = self._make_board()
+        board.ensure_definition("vpc", "prod", "/tmp")
+        board.mark("vpc", TerraformAction.PLAN, "done")
+        assert "vpc" in str(board._build_detail_chunks())
+
+    def test_detail_contains_action_column(self):
+        board = self._make_board()
+        board.ensure_definition("vpc", "prod", "/tmp")
+        board.mark("vpc", TerraformAction.PLAN, "done")
+        assert "Plan" in str(board._build_detail_chunks())
+
+    def test_only_observed_actions_as_columns(self):
+        board = self._make_board()
+        board.ensure_definition("vpc", "prod", "/tmp")
+        board.mark("vpc", TerraformAction.INIT, "done")
+        board.mark("vpc", TerraformAction.PLAN, "done")
+        text = str(board._build_detail_chunks())
+        assert "Apply" not in text
+        assert "Destroy" not in text
+
+    def test_chunk_uses_fields_layout(self):
+        board = self._make_board()
+        board.ensure_definition("vpc", "prod", "/tmp")
+        board.mark("vpc", TerraformAction.PLAN, "done")
+        chunk = board._build_detail_chunks()[0]
+        fields_sections = [
+            b for b in chunk if b.get("type") == "section" and "fields" in b
+        ]
+        assert len(fields_sections) >= 2  # header row + at least one definition row
+
+    def test_chunk_header_fields_structure(self):
+        board = self._make_board()
+        board.ensure_definition("vpc", "prod", "/tmp")
+        board.mark("vpc", TerraformAction.PLAN, "done")
+        chunk = board._build_detail_chunks()[0]
+        header = [b for b in chunk if b.get("type") == "section" and "fields" in b][0]
+        assert len(header["fields"]) == 2
+        assert header["fields"][0]["text"] == "*Definition*"
+        assert "*Plan*" in header["fields"][1]["text"]
+
+    def test_chunk_definition_row_structure(self):
+        board = self._make_board()
+        board.ensure_definition("vpc", "prod", "/tmp")
+        board.mark("vpc", TerraformAction.PLAN, "done")
+        chunk = board._build_detail_chunks()[0]
+        rows = [b for b in chunk if b.get("type") == "section" and "fields" in b]
+        def_row = rows[1]
+        assert "`vpc`" in def_row["fields"][0]["text"]
+        assert "✅" in def_row["fields"][1]["text"]
+
+    def test_multiple_definitions_one_chunk(self):
+        board = self._make_board()
+        for name in ["vpc", "eks", "rds"]:
+            board.ensure_definition(name, "prod", "/tmp")
+            board.mark(name, TerraformAction.PLAN, "done")
+        chunks = board._build_detail_chunks()
+        assert len(chunks) == 1
+        rows = [
+            b for b in chunks[0] if b.get("type") == "section" and "fields" in b
+        ]
+        assert len(rows) == 4  # 1 header + 3 definition rows
+
+    def test_row_section_blocks_have_no_text_key(self):
+        board = self._make_board()
+        board.ensure_definition("vpc", "prod", "/tmp")
+        board.mark("vpc", TerraformAction.PLAN, "done")
+        for block in board._build_detail_chunks()[0]:
             if block.get("type") == "section" and "fields" in block:
                 assert "text" not in block
+
+    def test_large_board_splits_under_block_limit(self):
+        """Many definitions split into multiple messages, each under Slack's limit."""
+        board = self._make_board()
+        for i in range(60):
+            name = f"svc_{i:02d}"
+            board.ensure_definition(name, "prod", "/tmp")
+            board.mark(name, TerraformAction.INIT, "pending")
+            board.mark(name, TerraformAction.PLAN, "pending")
+        chunks = board._build_detail_chunks()
+        assert len(chunks) == 2  # ceil(60 / DETAIL_ROWS_PER_MSG=45)
+        for chunk in chunks:
+            assert len(chunk) <= board.MAX_BLOCKS
+
+    def test_no_chunks_when_no_actions(self):
+        board = self._make_board()
+        assert board._build_detail_chunks() == []
 
 
 class TestSlackStatusBoardPostOrUpdate:
@@ -429,12 +433,16 @@ class TestSlackStatusBoardPostOrUpdate:
         client.chat_postMessage.return_value = {"ts": "111.222", "channel": "C123"}
         return client
 
-    def test_first_call_uses_post_message(self):
+    def test_first_call_posts_parent_and_thread(self):
         board = self._make_board()
         client = self._mock_client()
         board.post_or_update(client)
-        client.chat_postMessage.assert_called_once()
+        # parent summary message + one threaded detail message
+        assert client.chat_postMessage.call_count == 2
         client.chat_update.assert_not_called()
+        first, second = client.chat_postMessage.call_args_list
+        assert first.kwargs.get("thread_ts") is None  # parent (thread root)
+        assert second.kwargs.get("thread_ts") == "111.222"  # threaded detail
 
     def test_first_call_stores_ts(self):
         board = self._make_board()
@@ -448,15 +456,25 @@ class TestSlackStatusBoardPostOrUpdate:
         board.post_or_update(client)
         board.mark("vpc", TerraformAction.PLAN, "done")
         board.post_or_update(client)
-        client.chat_update.assert_called_once()
+        # both the parent summary and the changed detail chunk are updated
+        assert client.chat_update.called
+
+    def test_unchanged_second_call_is_noop(self):
+        board = self._make_board()
+        client = self._mock_client()
+        board.post_or_update(client)
+        board.post_or_update(client)  # nothing changed
+        client.chat_update.assert_not_called()
 
     def test_update_uses_stored_ts(self):
         board = self._make_board()
         client = self._mock_client()
         board.post_or_update(client)
+        board.mark("vpc", TerraformAction.PLAN, "done")
         board.post_or_update(client)
-        call_kwargs = client.chat_update.call_args.kwargs
-        assert call_kwargs["ts"] == "111.222"
+        assert client.chat_update.called
+        for call in client.chat_update.call_args_list:
+            assert call.kwargs["ts"] == "111.222"
 
     def test_slack_error_is_logged_not_raised(self):
         board = self._make_board()
@@ -528,7 +546,7 @@ class TestSlackHandlerExecute:
         defn = self._make_definition()
         handler.execute(TerraformAction.PLAN, TerraformStage.PRE, "prod", defn, "/tmp")
         assert handler._board._statuses["vpc"]["plan"] == "running"
-        handler._client.chat_postMessage.assert_called_once()
+        assert handler._client.chat_postMessage.called
 
     def test_post_success_marks_done_and_updates(self):
         handler = self._make_handler()
@@ -539,7 +557,7 @@ class TestSlackHandlerExecute:
             TerraformAction.PLAN, TerraformStage.POST, "prod", defn, "/tmp", result
         )
         assert handler._board._statuses["vpc"]["plan"] == "done"
-        handler._client.chat_update.assert_called_once()
+        assert handler._client.chat_update.called
 
     def test_post_failure_marks_failed_and_updates(self):
         handler = self._make_handler()
@@ -560,7 +578,7 @@ class TestSlackHandlerExecute:
             TerraformAction.APPLY, TerraformStage.ERROR, "prod", defn, "/tmp", result
         )
         assert handler._board._statuses["vpc"]["apply"] == "failed"
-        handler._client.chat_update.assert_called_once()
+        assert handler._client.chat_update.called
 
     def test_multiple_definitions_tracked(self):
         handler = self._make_handler()
@@ -735,7 +753,7 @@ class TestSlackHandlerSetup:
     def test_posts_initial_board(self):
         h = self._make_handler()
         h.setup("prod", self._defs(["vpc"]), "/tmp", self._opts())
-        h._client.chat_postMessage.assert_called_once()
+        assert h._client.chat_postMessage.called
 
     def test_slack_error_does_not_raise(self):
         h = self._make_handler()
@@ -773,6 +791,9 @@ class TestSlackHandlerTeardown:
         h._client = MagicMock()
         h._client.chat_postMessage.return_value = {"ts": "1.2", "channel": "C1"}
         h._client.chat_update.return_value = {}
+        # Simulate that setup() already posted the parent + one threaded detail
+        # message, so teardown updates them in place rather than posting anew.
+        h._board._detail_ts = ["1.2"]
         return h
 
     def test_teardown_posts_final_update(self):
@@ -781,7 +802,7 @@ class TestSlackHandlerTeardown:
         h._board.mark("vpc", TerraformAction.PLAN, "done")
         h._board._ts = "1.2"
         h.teardown("prod", "/tmp")
-        h._client.chat_update.assert_called_once()
+        assert h._client.chat_update.called
 
     def test_teardown_fixes_stuck_running(self):
         """PRE fired but plan was skipped — teardown marks it skipped, not failed.
