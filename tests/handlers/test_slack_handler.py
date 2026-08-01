@@ -282,7 +282,11 @@ class TestMainBlocks:
         assert container["has_header_divider"] is True
         assert "is_collapsible" not in container
         subtitle = container["subtitle"]["text"]
-        assert "run `1234`" in subtitle and "updated" in subtitle
+        assert "run `1234`" in subtitle
+        # viewer-local start time and relative "updated" with UTC fallbacks
+        assert "started <!date^" in subtitle and "^{time}|" in subtitle
+        assert "updated <!date^" in subtitle and "^{ago}|" in subtitle
+        assert "UTC>" in subtitle
 
         status, counts, links = container["child_blocks"]
         assert "*Applying*" in status["text"]["text"]
