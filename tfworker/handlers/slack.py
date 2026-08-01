@@ -33,6 +33,9 @@ Notes on Slack API behavior this module encodes (all confirmed live):
 - ``data_table`` cells reject ``raw_number``; numeric columns use ``raw_text``.
 - ``plan`` blocks keep a stable ``block_id`` across updates: a fresh id makes
   Slack treat the block as new and reset its expanded/collapsed state.
+- The ``<!date>`` command renders in section/context blocks (including
+  container children) but NOT in the container title or subtitle, where the
+  raw syntax is displayed literally.
 - ``blocks.validate`` accepts payloads the message APIs reject; only real
   ``chat.postMessage``/``chat.update`` calls prove a payload.
 - The bot token only has ``chat:write``/``chat:write.public`` so every posted
@@ -522,10 +525,10 @@ class SlackStatusBoard:
         elif self._commit:
             parts.append(f"commit `{self._commit}`")
         if self.overall_status() == "in_progress":
-            # plain clocks: the container subtitle does not process Slack's
-            # <!date> command — it renders the syntax literally
+            # plain clock: the container subtitle does not process Slack's
+            # <!date> command — it renders the syntax literally. The live
+            # "updated N ago" lives in the links context, which does.
             parts.append(f"started {self._clock(self._started_wall)}")
-            parts.append(f"updated {self._clock(datetime.now(timezone.utc))}")
         else:
             parts.append(f"finished in {self._elapsed_text()}")
         return " · ".join(parts)
@@ -632,10 +635,22 @@ class SlackStatusBoard:
 
     def _links_context(self) -> dict:
         text = ":thread: per-definition table in thread" + self._links_suffix()
+        elements = [{"type": "mrkdwn", "text": text}]
+        if self.overall_status() == "in_progress":
+            now = datetime.now(timezone.utc)
+            elements.append(
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"updated <!date^{int(now.timestamp())}^{{ago}}"
+                        f"|{self._clock(now)}>"
+                    ),
+                }
+            )
         return {
             "type": "context",
             "block_id": "run_links",
-            "elements": [{"type": "mrkdwn", "text": text}],
+            "elements": elements,
         }
 
     def _failures_table(self, failed: list[DefinitionRecord]) -> list[dict]:
@@ -1076,13 +1091,22 @@ class SlackStatusBoard:
     def _normalize_for_compare(blocks: list[dict]) -> list[dict]:
         """Blocks minus volatile fields, so no-op updates can be skipped.
 
-        The container subtitle carries an "updated HH:MM" clock, which alone
-        should not force a send.
+        The subtitle's "started" clock and the links context's live
+        "updated N ago" timestamp change with every render; neither alone
+        should force a send.
         """
         normalized = copy.deepcopy(blocks)
         for block in normalized:
-            if block.get("type") == "container" and "subtitle" in block:
-                block["subtitle"] = {}
+            if block.get("type") != "container":
+                continue
+            block["subtitle"] = {}
+            for child in block.get("child_blocks", []):
+                if child.get("block_id") == "run_links":
+                    child["elements"] = [
+                        e
+                        for e in child["elements"]
+                        if not e.get("text", "").startswith("updated ")
+                    ]
         return normalized
 
     def _call_api(self, method, force: bool, **kwargs):

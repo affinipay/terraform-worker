@@ -285,12 +285,10 @@ class TestMainBlocks:
         assert "is_collapsible" not in container
         subtitle = container["subtitle"]["text"]
         assert "run `1234`" in subtitle
-        # plain clocks in the configured timezone: the container subtitle
+        # plain clock in the configured timezone: the container subtitle
         # renders Slack's <!date> command literally rather than processing it
         assert "<!date" not in subtitle
-        assert re.search(
-            r"started \d\d:\d\d C[DS]T · updated \d\d:\d\d C[DS]T", subtitle
-        )
+        assert re.search(r"started \d\d:\d\d C[DS]T", subtitle)
 
         status, counts, links = container["child_blocks"]
         assert "*Applying*" in status["text"]["text"]
@@ -302,6 +300,9 @@ class TestMainBlocks:
         assert "*2* running" in counts_text
         assert "*128* queued" in counts_text
         assert "<https://argo.example/wf|Argo workflow>" in links["elements"][0]["text"]
+        # live relative timestamp in the links context (which renders <!date>)
+        updated = links["elements"][1]["text"]
+        assert re.search(r"updated <!date\^\d+\^\{ago\}\|\d\d:\d\d C[DS]T>", updated)
 
     def test_success_final_layout(self):
         board = make_board()
