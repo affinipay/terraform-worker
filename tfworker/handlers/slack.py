@@ -23,6 +23,8 @@ Example configuration::
         # replaced with the definition name
         definition_log_url_template: "https://app.datadoghq.com/logs?query=service%3Aneptune-executor%20%40definition%3A{definition}"
         update_interval: 4.0       # min seconds between Slack updates
+        timezone: "America/Chicago"  # for timestamp fallback text; live
+                                     # timestamps render in the viewer's tz
 
 Notes on Slack API behavior this module encodes (all confirmed live):
 
@@ -45,6 +47,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Union
+from zoneinfo import ZoneInfo
 
 import click
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -83,6 +86,7 @@ class SlackConfig(BaseModel):
     links: list[SlackLink] = Field(default_factory=list)
     definition_log_url_template: str | None = None
     update_interval: float = Field(default=4.0, ge=0.0)
+    timezone: str = "America/Chicago"
 
     _resolved_token: str = PrivateAttr(default="")
 
@@ -180,14 +184,15 @@ class SlackStatusBoard:
     }
     ACTION_ORDER: list[str] = ["init", "plan", "apply", "destroy"]
     ACTION_NOUNS: dict[str, tuple[str, str, str]] = {
-        # action -> (noun, present participle, past tense)
-        "plan": ("Plan", "Planning", "planned"),
+        # action -> (noun, present participle, outcome phrase)
+        # plan's outcome reads "N with changes", complementing "N no changes"
+        "plan": ("Plan", "Planning", "with changes"),
         "apply": ("Apply", "Applying", "applied"),
         "destroy": ("Destroy", "Destroying", "destroyed"),
         "init": ("Init", "Initializing", "initialized"),
     }
     MAX_ERROR_CARDS: int = 5
-    MAX_NAMED_RUNNING: int = 2
+    MAX_NAMED_RUNNING: int = 10
     MAX_FAILURE_TABLE_ROWS: int = 5
     MAX_DATA_TABLE_ROWS: int = 200
     MAX_DATA_TABLE_CHARS: int = 18000
@@ -485,7 +490,12 @@ class SlackStatusBoard:
         return f"{round(secs / 60)} min"
 
     def _clock(self, dt: datetime) -> str:
-        return dt.strftime("%H:%M UTC")
+        """Fallback clock text in the configured timezone (UTC if unknown)."""
+        try:
+            dt = dt.astimezone(ZoneInfo(self._config.timezone))
+        except Exception:
+            pass
+        return dt.strftime("%H:%M %Z")
 
     def _run_key(self) -> str:
         raw = self._run_id or self._deployment or "run"
@@ -749,8 +759,8 @@ class SlackStatusBoard:
         return names
 
     def _rollup_complete_task(self, buckets: dict) -> dict | None:
-        _, _, past = self._nouns()
-        ok = len(buckets["ok"])
+        _, _, outcome = self._nouns()
+        ok = buckets["ok"]
         if not ok:
             return None
         changes = self._total_resource_changes()
@@ -762,8 +772,9 @@ class SlackStatusBoard:
         summary = f"{changes} {label}" if changes else "no resource changes"
         return {
             "task_id": "rollup_complete",
-            "title": f"{ok} definitions {past} cleanly",
+            "title": f"{len(ok)} definitions {outcome}",
             "status": "complete",
+            "details": _rich_text([{"type": "text", "text": self._name_list(ok)}]),
             "output": _rich_text(
                 [
                     {
@@ -775,12 +786,18 @@ class SlackStatusBoard:
         }
 
     def _build_plan_block(self, buckets: dict) -> dict | None:
+        """The "Run Details" feed: failures, then outcome rollups (with
+        changes / no changes / skipped), then per-definition running tasks
+        and the queue while the run is live."""
         overall = self.overall_status()
         if overall == "failed":
             # final failures live in the container's table instead
             return None
 
         tasks: list[dict] = []
+
+        for rec in buckets["failed"][: self.MAX_ERROR_CARDS]:
+            tasks.append(self._error_task(rec))
 
         rollup = self._rollup_complete_task(buckets)
         if rollup:
@@ -805,24 +822,24 @@ class SlackStatusBoard:
                     ),
                 }
             )
+        if buckets["skipped"]:
+            tasks.append(
+                {
+                    "task_id": "rollup_skipped",
+                    "title": f"{len(buckets['skipped'])} definitions skipped — not run",
+                    "status": "complete",
+                    "details": _rich_text(
+                        [
+                            {
+                                "type": "text",
+                                "text": self._name_list(buckets["skipped"]),
+                            }
+                        ]
+                    ),
+                }
+            )
 
         if overall == "done":
-            if buckets["skipped"]:
-                tasks.append(
-                    {
-                        "task_id": "rollup_skipped",
-                        "title": f"{len(buckets['skipped'])} definitions skipped — not run",
-                        "status": "complete",
-                        "details": _rich_text(
-                            [
-                                {
-                                    "type": "text",
-                                    "text": self._name_list(buckets["skipped"]),
-                                }
-                            ]
-                        ),
-                    }
-                )
             stored = len([r for r in self._records.values() if r.planned_changes])
             if self._backend_plans and self._primary_action == "plan" and stored:
                 run_ref = f" keyed by run {self._run_id}" if self._run_id else ""
@@ -843,9 +860,8 @@ class SlackStatusBoard:
                     }
                 )
         else:
-            for rec in buckets["failed"][: self.MAX_ERROR_CARDS]:
-                tasks.append(self._error_task(rec))
-
+            # every running definition gets its own task showing the step it
+            # is on; the rollup only absorbs overflow past MAX_NAMED_RUNNING
             running = buckets["running"]
             for rec in running[: self.MAX_NAMED_RUNNING]:
                 task: dict = {
@@ -899,7 +915,7 @@ class SlackStatusBoard:
             # block as new and reset its expanded/collapsed state, collapsing
             # the feed under a watching user
             "block_id": f"{self._run_key()}_plan",
-            "title": "Run progress",
+            "title": "📝 Run Details",
             "tasks": tasks,
         }
 

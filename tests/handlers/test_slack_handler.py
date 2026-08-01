@@ -89,6 +89,7 @@ class TestSlackConfig:
         assert cfg.title is None
         assert cfg.definition_log_url_template is None
         assert cfg.update_interval == 4.0
+        assert cfg.timezone == "America/Chicago"
         assert cfg.links[0].url == "https://argo.example/wf/1"
 
     def test_token_not_exposed_in_repr(self):
@@ -286,7 +287,6 @@ class TestMainBlocks:
         # viewer-local start time and relative "updated" with UTC fallbacks
         assert "started <!date^" in subtitle and "^{time}|" in subtitle
         assert "updated <!date^" in subtitle and "^{ago}|" in subtitle
-        assert "UTC>" in subtitle
 
         status, counts, links = container["child_blocks"]
         assert "*Applying*" in status["text"]["text"]
@@ -371,22 +371,23 @@ class TestPlanBlock:
 
     def test_running_tasks_named_oldest_first_then_rolled_up(self):
         board = make_board()
-        register(board, *[f"def{i}" for i in range(6)])
-        for i in range(5):
-            board.mark(f"def{i}", TerraformAction.INIT, "running")
-        board._records["def3"].started_at = 0.5  # oldest
+        register(board, *[f"def{i:02d}" for i in range(14)])
+        for i in range(12):
+            board.mark(f"def{i:02d}", TerraformAction.INIT, "running")
+        board._records["def03"].started_at = 0.5  # oldest
 
         plan = board._build_main_blocks()[1]
+        assert plan["title"] == "📝 Run Details"
         named = [t for t in plan["tasks"] if t["task_id"].startswith("run_")]
         assert len(named) == board.MAX_NAMED_RUNNING
-        assert named[0]["task_id"] == "run_def3"
+        assert named[0]["task_id"] == "run_def03"
         # verbs follow the action actually running (init here), not the
         # run's primary verb ("applying")
         assert named[0]["title"].endswith("— initializing")
         rollup = next(t for t in plan["tasks"] if t["task_id"] == "rollup_running")
-        assert "3 more initializing" in rollup["title"]
+        assert "2 more initializing" in rollup["title"]
         queued = next(t for t in plan["tasks"] if t["task_id"] == "rollup_queued")
-        assert "1 definitions queued" in queued["title"]
+        assert "2 definitions queued" in queued["title"]
 
     def test_no_changes_rollup_shown_mid_run(self):
         board = make_board()
@@ -441,7 +442,7 @@ class TestPlanBlock:
             for t in board._build_main_blocks()[1]["tasks"]
             if t["task_id"] == "rollup_complete"
         )
-        assert "1 definitions applied cleanly" in rollup["title"]
+        assert "1 definitions applied" in rollup["title"]
         assert "5 resources changed" in rich_text(rollup["output"])
 
     def test_plans_stored_card_only_for_backend_plan_runs(self):
