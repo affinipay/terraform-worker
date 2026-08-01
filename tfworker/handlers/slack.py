@@ -510,11 +510,6 @@ class SlackStatusBoard:
     def _links_suffix(self) -> str:
         return "".join(f" · <{lk.url}|{lk.text}>" for lk in self._config.links)
 
-    def _slack_date(self, dt: datetime, token: str) -> str:
-        """Slack date mrkdwn: rendered in the viewer's local time (or as a
-        relative "N minutes ago" for {ago}), with a UTC clock fallback."""
-        return f"<!date^{int(dt.timestamp())}^{{{token}}}|{self._clock(dt)}>"
-
     def _subtitle(self) -> str:
         parts: list[str] = []
         if self._run_id:
@@ -527,10 +522,10 @@ class SlackStatusBoard:
         elif self._commit:
             parts.append(f"commit `{self._commit}`")
         if self.overall_status() == "in_progress":
-            parts.append(f"started {self._slack_date(self._started_wall, 'time')}")
-            parts.append(
-                f"updated {self._slack_date(datetime.now(timezone.utc), 'ago')}"
-            )
+            # plain clocks: the container subtitle does not process Slack's
+            # <!date> command — it renders the syntax literally
+            parts.append(f"started {self._clock(self._started_wall)}")
+            parts.append(f"updated {self._clock(datetime.now(timezone.utc))}")
         else:
             parts.append(f"finished in {self._elapsed_text()}")
         return " · ".join(parts)

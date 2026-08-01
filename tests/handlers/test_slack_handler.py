@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -284,9 +285,12 @@ class TestMainBlocks:
         assert "is_collapsible" not in container
         subtitle = container["subtitle"]["text"]
         assert "run `1234`" in subtitle
-        # viewer-local start time and relative "updated" with UTC fallbacks
-        assert "started <!date^" in subtitle and "^{time}|" in subtitle
-        assert "updated <!date^" in subtitle and "^{ago}|" in subtitle
+        # plain clocks in the configured timezone: the container subtitle
+        # renders Slack's <!date> command literally rather than processing it
+        assert "<!date" not in subtitle
+        assert re.search(
+            r"started \d\d:\d\d C[DS]T · updated \d\d:\d\d C[DS]T", subtitle
+        )
 
         status, counts, links = container["child_blocks"]
         assert "*Applying*" in status["text"]["text"]
