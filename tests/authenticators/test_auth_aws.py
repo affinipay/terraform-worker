@@ -312,7 +312,7 @@ class TestGetInitSessionArgs:
         assert _get_init_session_args(auth_config) == expected
 
     def test_with_all_parameters(self):
-        """Test with all parameters provided."""
+        """Explicit credentials win; the profile is dropped rather than combined."""
         auth_config = AWSAuthenticatorConfig(
             aws_profile="test_profile",
             aws_access_key_id="test_id",
@@ -321,10 +321,22 @@ class TestGetInitSessionArgs:
             aws_region="us-east-1",
         )
         expected = {
-            "profile_name": "test_profile",
             "aws_access_key_id": "test_id",
             "aws_secret_access_key": "test_secret",
             "aws_session_token": "test_token",
+        }
+        assert _get_init_session_args(auth_config) == expected
+
+    def test_profile_kept_with_partial_credentials(self):
+        """A key id without a secret is not a usable credential, so the profile stands."""
+        auth_config = AWSAuthenticatorConfig(
+            aws_profile="test_profile",
+            aws_access_key_id="test_id",
+            aws_region="us-east-1",
+        )
+        expected = {
+            "profile_name": "test_profile",
+            "aws_access_key_id": "test_id",
         }
         assert _get_init_session_args(auth_config) == expected
 

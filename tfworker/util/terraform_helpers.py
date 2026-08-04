@@ -158,10 +158,14 @@ def _find_required_providers(
                     try:
                         content = hcl2.load(f)
                     except UnexpectedToken as e:
-                        log.info(
-                            f"not processing {root}/{file} for required providers; see debug output for HCL parsing errors"
+                        # Unparsable .tf files are routine here: the walk covers
+                        # vendored module trees, and a file this parser chokes on
+                        # is not necessarily one terraform rejects. Nothing is
+                        # skipped that the caller asked for, so this is detail for
+                        # a debug run, not an operator-facing event.
+                        log.debug(
+                            f"not processing {root}/{file} for required providers; HCL parsing error: {e}"
                         )
-                        log.debug(f"HCL processing errors in {root}/{file}: {e}")
                         continue
                     _update_parsed_providers(
                         providers, _parse_required_providers(content)
