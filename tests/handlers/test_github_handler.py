@@ -57,6 +57,9 @@ def make_handler(config=None, with_pr=True) -> GithubHandler:
         handler._issue = None
     handler._check = mock.Mock()
     handler._check.html_url = "https://github.test/check/1"
+    handler._def_checks = {"mydef": mock.Mock()}
+    handler._def_checks["mydef"].html_url = "https://github.test/check/mydef"
+    handler._def_concluded = set()
     handler._comments = []
     handler._api_failures = 0
     handler._report = GithubStatusReport(
@@ -370,6 +373,109 @@ class TestGithubHandlerExecute:
         )
         assert ret is None
         handler._issue.create_comment.assert_not_called()
+
+
+class TestPerDefinitionChecks:
+    def test_pre_plan_starts_definition_check(self):
+        handler = make_handler()
+        handler.execute(
+            action=TerraformAction.PLAN,
+            stage=TerraformStage.PRE,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+        )
+        handler._def_checks["mydef"].edit.assert_called_once_with(status="in_progress")
+
+    def test_post_plan_changes_concludes_success(self):
+        handler = make_handler()
+        ret = handler.execute(
+            action=TerraformAction.PLAN,
+            stage=TerraformStage.POST,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=TerraformResult(2, PLAN_STDOUT, b""),
+        )
+        kwargs = handler._def_checks["mydef"].edit.call_args.kwargs
+        assert kwargs["status"] == "completed"
+        assert kwargs["conclusion"] == "success"
+        assert kwargs["output"]["title"] == "Plan: 1 to add, 0 to change, 0 to destroy."
+        assert "null_resource.example" in kwargs["output"]["summary"]
+        assert ret.definition_check_url == "https://github.test/check/mydef"
+
+    def test_post_plan_no_changes_concludes_success(self):
+        handler = make_handler()
+        handler.execute(
+            action=TerraformAction.PLAN,
+            stage=TerraformStage.POST,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=TerraformResult(0, b"No changes.", b""),
+        )
+        kwargs = handler._def_checks["mydef"].edit.call_args.kwargs
+        assert kwargs["conclusion"] == "success"
+        assert kwargs["output"]["title"] == "No changes."
+
+    def test_post_plan_failure_concludes_failure(self):
+        handler = make_handler()
+        handler.execute(
+            action=TerraformAction.PLAN,
+            stage=TerraformStage.POST,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=TerraformResult(1, b"", b"Error: broken\n"),
+        )
+        kwargs = handler._def_checks["mydef"].edit.call_args.kwargs
+        assert kwargs["conclusion"] == "failure"
+        assert "broken" in kwargs["output"]["summary"]
+
+    def test_error_stage_concludes_failure(self):
+        handler = make_handler()
+        handler.execute(
+            action=TerraformAction.PLAN,
+            stage=TerraformStage.ERROR,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=TerraformResult(1, b"", b"Error: bad provider\n"),
+        )
+        kwargs = handler._def_checks["mydef"].edit.call_args.kwargs
+        assert kwargs["conclusion"] == "failure"
+
+    def test_definition_check_concluded_only_once(self):
+        handler = make_handler()
+        handler._conclude_def_check("mydef", "failure", "failed")
+        handler._conclude_def_check("mydef", "skipped", "skipped")
+        handler._def_checks["mydef"].edit.assert_called_once()
+
+    def test_teardown_skips_unconcluded_definition_checks(self):
+        handler = make_handler()
+        handler._def_checks["never_ran"] = mock.Mock()
+        handler._report.ensure("never_ran")
+        handler._conclude_def_check("mydef", "success", "done")
+
+        handler.teardown("dep", "/tmp")
+
+        kwargs = handler._def_checks["never_ran"].edit.call_args.kwargs
+        assert kwargs["conclusion"] == "skipped"
+        # already-concluded checks are not edited again
+        handler._def_checks["mydef"].edit.assert_called_once()
+
+    def test_table_links_definition_to_its_check(self):
+        report = GithubStatusReport(
+            deployment="dep", marker="tfworker-status", max_detail_chars=100
+        )
+        report.ensure("linked")
+        report.set_url("linked", "https://github.test/check/linked")
+        report.ensure("unlinked")
+
+        body = report.render_comment_bodies()[0]
+
+        assert "| [`linked`](https://github.test/check/linked) |" in body
+        assert "| `unlinked` |" in body
 
 
 class TestCommentManagement:

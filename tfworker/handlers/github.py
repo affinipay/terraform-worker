@@ -2,8 +2,10 @@
 
 Authenticates as a GitHub App and, for plan runs, maintains:
 
-- a check run on the PR head commit (the Checks API "check status"), whose
-  markdown output carries a per-definition job summary
+- a rollup check run on the PR head commit whose markdown output carries the
+  per-definition job summary, plus one check run per definition (created
+  queued, started at plan pre, and concluded from the plan result) so each
+  definition reports its own status like Atlantis project checks
 - a live status comment on the pull request (when one is configured),
   updated in place as each definition plans; overflow detail is split
   across additional comments when the body exceeds GitHub's size limit
@@ -158,6 +160,7 @@ class GithubConfig(BaseModel):
 class GithubResult(BaseHandlerResult):
     definition: str
     check_run_url: Optional[str] = None
+    definition_check_url: Optional[str] = None
     comment_url: Optional[str] = None
 
 
@@ -198,8 +201,12 @@ class GithubStatusReport:
 
     def ensure(self, name: str) -> None:
         self._rows.setdefault(
-            name, {"status": "pending", "plan_line": "", "detail": ""}
+            name, {"status": "pending", "plan_line": "", "detail": "", "url": ""}
         )
+
+    def set_url(self, name: str, url: str) -> None:
+        self.ensure(name)
+        self._rows[name]["url"] = url
 
     def mark(self, name: str, status: str, plan_line: str = "", detail: str = ""):
         self.ensure(name)
@@ -243,7 +250,8 @@ class GithubStatusReport:
         lines = ["| Definition | Status | Plan |", "| --- | --- | --- |"]
         for name, row in self._rows.items():
             display = STATUS_DISPLAY.get(row["status"], row["status"])
-            lines.append(f"| `{name}` | {display} | {row['plan_line']} |")
+            label = f"[`{name}`]({row['url']})" if row["url"] else f"`{name}`"
+            lines.append(f"| {label} | {display} | {row['plan_line']} |")
         return "\n".join(lines)
 
     def _detail_blocks(self) -> List[str]:
@@ -325,6 +333,8 @@ class GithubHandler(BaseHandler):
         self._pr = None
         self._issue = None
         self._check = None
+        self._def_checks: dict = {}
+        self._def_concluded: set = set()
         self._report: Optional[GithubStatusReport] = None
         self._comments: List = []
         self._api_failures = 0
@@ -387,6 +397,14 @@ class GithubHandler(BaseHandler):
                 },
             )
             self._report.check_url = self._check.html_url
+            for defn in definitions.values():
+                check = self._repo.create_check_run(
+                    name=f"{check_name}: {defn.name}",
+                    head_sha=head_sha,
+                    status="queued",
+                )
+                self._def_checks[defn.name] = check
+                self._report.set_url(defn.name, check.html_url)
             self._update_comments()
         except Exception as e:
             log.error(f"github handler setup failed: {e}")
@@ -410,6 +428,8 @@ class GithubHandler(BaseHandler):
         try:
             if stage == TerraformStage.PRE:
                 self._report.mark(definition.name, "running")
+                if definition.name in self._def_checks:
+                    self._def_checks[definition.name].edit(status="in_progress")
                 self._update_comments()
                 return None
             if stage == TerraformStage.POST and result is not None:
@@ -419,6 +439,12 @@ class GithubHandler(BaseHandler):
                     definition.name,
                     "failed",
                     detail=self._error_detail(result),
+                )
+                self._conclude_def_check(
+                    definition.name,
+                    "failure",
+                    "Terraform plan failed",
+                    self._error_detail(result),
                 )
                 self._update_comments()
                 self._update_check("Terraform plan in progress")
@@ -432,6 +458,8 @@ class GithubHandler(BaseHandler):
             return
         try:
             self._report.finalize()
+            for name in self._def_checks:
+                self._conclude_def_check(name, "skipped", "Plan skipped")
             conclusion = self._report.conclusion()
             title = f"Terraform plan {conclusion}: {self._report.summary_line()}"
             if self._check is not None:
@@ -456,27 +484,36 @@ class GithubHandler(BaseHandler):
     ) -> Union[GithubResult, None]:
         if result.exit_code == 0:
             self._report.mark(definition.name, "no_changes", plan_line="No changes.")
+            self._conclude_def_check(definition.name, "success", "No changes.")
         elif result.has_changes():
             text = strip_ansi(result.stdout_str)
             detail = self._summary_for(definition) or self._trimmed_plan(text)
+            plan_line = self._plan_line(text)
             self._report.mark(
                 definition.name,
                 "changes",
-                plan_line=self._plan_line(text),
+                plan_line=plan_line,
                 detail=detail,
             )
+            self._conclude_def_check(
+                definition.name, "success", plan_line or "Changes planned", detail
+            )
         else:
-            self._report.mark(
-                definition.name, "failed", detail=self._error_detail(result)
+            error_detail = self._error_detail(result)
+            self._report.mark(definition.name, "failed", detail=error_detail)
+            self._conclude_def_check(
+                definition.name, "failure", "Terraform plan failed", error_detail
             )
         self._update_comments()
         self._update_check("Terraform plan in progress")
+        def_check = self._def_checks.get(definition.name)
         return GithubResult(
             handler="github",
             action=TerraformAction.PLAN,
             stage=TerraformStage.POST,
             definition=definition.name,
             check_run_url=self._check.html_url if self._check else None,
+            definition_check_url=def_check.html_url if def_check else None,
             comment_url=self._comments[0].html_url if self._comments else None,
         )
 
@@ -605,6 +642,20 @@ class GithubHandler(BaseHandler):
             return
         self._check.edit(
             output={"title": title, "summary": self._report.render_check_summary()}
+        )
+
+    def _conclude_def_check(
+        self, name: str, conclusion: str, title: str, summary: str = ""
+    ) -> None:
+        """Complete a per-definition check run; once concluded it stays as-is."""
+        check = self._def_checks.get(name)
+        if check is None or name in self._def_concluded:
+            return
+        self._def_concluded.add(name)
+        check.edit(
+            status="completed",
+            conclusion=conclusion,
+            output={"title": title[:255], "summary": summary[:BODY_BUDGET]},
         )
 
     def _record_api_failure(self, context: str, exc: Exception) -> None:
