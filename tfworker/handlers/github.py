@@ -9,7 +9,6 @@ Authenticates as a GitHub App and, for plan runs, maintains:
 - a live status comment on the pull request (when one is configured),
   updated in place as each definition plans; overflow detail is split
   across additional comments when the body exceeds GitHub's size limit
-- an optional GitHub Actions step summary ($GITHUB_STEP_SUMMARY)
 
 When the openai handler is also configured, its plan summary is embedded in
 the per-definition details; otherwise a trimmed copy of the plan output is
@@ -90,10 +89,6 @@ class GithubConfig(BaseModel):
     check_run_name: Optional[str] = Field(
         default=None,
         description="Name of the check run; defaults to 'tfworker/<deployment>/plan'.",
-    )
-    step_summary: bool = Field(
-        default=True,
-        description="Append the final summary to $GITHUB_STEP_SUMMARY when present.",
     )
     comment_marker: str = "tfworker-status"
     max_detail_chars: int = Field(
@@ -453,7 +448,7 @@ class GithubHandler(BaseHandler):
         return None
 
     def teardown(self, deployment: str, working_dir: str) -> None:
-        """Conclude the check run and finalize the comment and step summary."""
+        """Conclude the check runs and finalize the comment."""
         if self._report is None:
             return
         try:
@@ -472,7 +467,6 @@ class GithubHandler(BaseHandler):
                     },
                 )
             self._update_comments()
-            self._write_step_summary()
         except Exception as e:
             log.error(f"github handler teardown failed: {e}")
 
@@ -666,15 +660,3 @@ class GithubHandler(BaseHandler):
                 f"github handler disabled after {self._api_failures} consecutive API failures"
             )
             self._ready = False
-
-    def _write_step_summary(self) -> None:
-        if not self.config.step_summary:
-            return
-        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-        if not summary_path:
-            return
-        try:
-            with open(summary_path, "a") as fh:
-                fh.write(self._report.render_check_summary() + "\n")
-        except OSError as e:
-            log.warn(f"github handler: unable to write step summary: {e}")

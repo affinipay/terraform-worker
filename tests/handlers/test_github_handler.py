@@ -17,7 +17,6 @@ GITHUB_ENV_VARS = [
     "GITHUB_APP_PRIVATE_KEY_FILE",
     "GITHUB_APP_INSTALLATION_ID",
     "GITHUB_SHA",
-    "GITHUB_STEP_SUMMARY",
 ]
 
 
@@ -538,16 +537,6 @@ class TestGithubHandlerTeardown:
         kwargs = handler._check.edit.call_args.kwargs
         assert kwargs["conclusion"] == "success"
         assert handler._report._rows["never_ran"]["status"] == "skipped"
-
-    def test_teardown_writes_step_summary(self, monkeypatch, tmp_path):
-        summary_file = tmp_path / "step_summary.md"
-        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
-        handler = make_handler()
-        handler._report.mark("mydef", "changes", plan_line="Plan: 1 to add")
-
-        handler.teardown("dep", "/tmp")
-
-        assert "| `mydef` |" in summary_file.read_text()
 
     def test_teardown_without_setup_is_noop(self):
         handler = make_handler()
