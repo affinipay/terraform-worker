@@ -6,7 +6,13 @@ import pytest
 from tfworker.commands.terraform import TerraformResult
 from tfworker.custom_types.terraform import TerraformAction, TerraformStage
 from tfworker.exceptions import HandlerError
-from tfworker.handlers.github import GithubConfig, GithubHandler, GithubStatusReport
+from tfworker.handlers.github import (
+    GithubConfig,
+    GithubHandler,
+    GithubStatusReport,
+    _chunk_markdown,
+    _fence_safe_truncate,
+)
 
 GITHUB_ENV_VARS = [
     "GITHUB_REPOSITORY",
@@ -170,12 +176,44 @@ class TestGithubStatusReport:
         assert "| `def1` | ⏳ pending |" in bodies[0]
         assert "| `def2` | 📝 changes | Plan: 1 to add |" in bodies[0]
 
-    def test_detail_truncated_to_max_chars(self):
+    def test_mark_preserves_full_detail(self):
         report = self.make_report(max_detail_chars=10)
         report.mark("def1", "changes", detail="x" * 50)
-        assert report._rows["def1"]["detail"].startswith("x" * 10)
-        assert "truncated" in report._rows["def1"]["detail"]
-        assert "x" * 11 not in report._rows["def1"]["detail"]
+        assert report._rows["def1"]["detail"] == "x" * 50
+
+    def test_check_summary_detail_truncated_fence_safe(self):
+        report = self.make_report(max_detail_chars=30)
+        report.mark(
+            "def1", "changes", detail="```\nline one\nline two\nline three\n```"
+        )
+        summary = report.render_check_summary()
+        assert "_… truncated_" in summary
+        assert summary.count("```") % 2 == 0
+        assert "line three" not in summary
+
+    def test_oversized_detail_splits_across_comments_without_loss(self):
+        report = self.make_report()
+        lines = "\n".join(f"resource line {i}" for i in range(100))
+        report.mark(
+            "def1",
+            "changes",
+            plan_line="Plan: 1 to add",
+            detail=f"```hcl\n{lines}\n```",
+        )
+
+        with (
+            mock.patch("tfworker.handlers.github.DETAIL_CHUNK_LIMIT", 400),
+            mock.patch("tfworker.handlers.github.BODY_BUDGET", 900),
+        ):
+            bodies = report.render_comment_bodies()
+
+        assert len(bodies) > 2
+        joined = "".join(bodies)
+        for i in range(100):
+            assert f"resource line {i}" in joined
+        for body in bodies:
+            assert body.count("```") % 2 == 0
+        assert "(part 1/" in joined
 
     def test_bodies_split_when_over_budget(self):
         report = self.make_report(max_detail_chars=400)
@@ -220,6 +258,32 @@ class TestGithubStatusReport:
         assert "| `def1` |" in summary
         assert "y" * 100 not in summary
         assert "Detail sections omitted" in summary
+
+
+class TestMarkdownHelpers:
+    def test_chunk_markdown_under_limit_is_single_chunk(self):
+        assert _chunk_markdown("short", 100) == ["short"]
+
+    def test_chunk_markdown_balances_and_reopens_fences(self):
+        text = "```hcl\n" + "\n".join(f"line {i}" for i in range(50)) + "\n```"
+        chunks = _chunk_markdown(text, 100)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert chunk.count("```") % 2 == 0
+        for chunk in chunks[1:]:
+            assert chunk.startswith("```hcl")
+        joined = "".join(chunks)
+        for i in range(50):
+            assert f"line {i}" in joined
+
+    def test_fence_safe_truncate_noop_under_limit(self):
+        assert _fence_safe_truncate("short", 100) == "short"
+
+    def test_fence_safe_truncate_closes_open_fence(self):
+        text = "```\n" + "x" * 200
+        out = _fence_safe_truncate(text, 50)
+        assert out.count("```") % 2 == 0
+        assert "_… truncated_" in out
 
 
 class TestGithubHandlerExecute:

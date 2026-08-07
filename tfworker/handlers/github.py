@@ -51,9 +51,51 @@ if TYPE_CHECKING:  # pragma: no cover
 # leave headroom for the markers and truncation notices added around them.
 GITHUB_BODY_LIMIT = 65536
 BODY_BUDGET = 60000
+# room left for a detail chunk after a continuation comment's marker,
+# heading, and <details> wrapper
+DETAIL_CHUNK_LIMIT = BODY_BUDGET - 1000
 
 # maximum consecutive API failures before the handler disables itself
 MAX_API_FAILURES = 3
+
+
+def _fence_safe_truncate(text: str, limit: int) -> str:
+    """Truncate markdown on a line boundary, closing any open code fence."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if "\n" in cut:
+        cut = cut[: cut.rfind("\n") + 1]
+    if cut.count("```") % 2 == 1:
+        cut += "```\n"
+    return cut + "\n_… truncated_"
+
+
+def _chunk_markdown(text: str, limit: int) -> List[str]:
+    """Split markdown into chunks on line boundaries, closing and reopening
+    code fences across chunk boundaries so each chunk renders standalone."""
+    if len(text) <= limit:
+        return [text]
+    chunks: List[str] = []
+    current: List[str] = []
+    size = 0
+    open_fence: Optional[str] = None
+    for line in text.splitlines(keepends=True):
+        if current and size + len(line) > limit:
+            if open_fence:
+                current.append("```\n")
+            chunks.append("".join(current).rstrip("\n"))
+            current = [f"{open_fence}\n"] if open_fence else []
+            size = sum(len(part) for part in current)
+        current.append(line)
+        size += len(line)
+        if line.strip().startswith("```"):
+            # remember the opening fence line (with any language tag) so the
+            # next chunk reopens the block identically
+            open_fence = None if open_fence else line.strip()
+    if current:
+        chunks.append("".join(current).rstrip("\n"))
+    return chunks
 
 
 class GithubConfig(BaseModel):
@@ -93,7 +135,7 @@ class GithubConfig(BaseModel):
     comment_marker: str = "tfworker-status"
     max_detail_chars: int = Field(
         default=8000,
-        description="Maximum characters of per-definition detail included in comments.",
+        description="Maximum characters of per-definition detail included in check run output, which cannot be split. PR comments always carry the full detail, split across comments as needed.",
     )
     required: bool = False
 
@@ -210,9 +252,7 @@ class GithubStatusReport:
         if plan_line:
             row["plan_line"] = plan_line
         if detail:
-            row["detail"] = detail[: self.max_detail_chars] + (
-                "\n\n_… truncated_" if len(detail) > self.max_detail_chars else ""
-            )
+            row["detail"] = detail
 
     def finalize(self) -> None:
         """Mark anything that never ran as skipped (aborted or filtered runs)."""
@@ -249,19 +289,39 @@ class GithubStatusReport:
             lines.append(f"| {label} | {display} | {row['plan_line']} |")
         return "\n".join(lines)
 
+    def _wrap_details(self, name: str, row: dict, body: str, part: str = "") -> str:
+        display = STATUS_DISPLAY.get(row["status"], row["status"])
+        return (
+            "<details>\n"
+            f"<summary><code>{name}</code> — {display}"
+            f"{' — ' + row['plan_line'] if row['plan_line'] else ''}{part}</summary>\n\n"
+            f"{body}\n\n"
+            "</details>"
+        )
+
     def _detail_blocks(self) -> List[str]:
+        """Detail blocks for the PR comments. Full detail is preserved; a
+        detail too large for one comment is chunked (closing and reopening
+        code fences) so it flows across continuation comments."""
         blocks = []
         for name, row in self._rows.items():
             if not row["detail"]:
                 continue
-            display = STATUS_DISPLAY.get(row["status"], row["status"])
-            blocks.append(
-                "<details>\n"
-                f"<summary><code>{name}</code> — {display}"
-                f"{' — ' + row['plan_line'] if row['plan_line'] else ''}</summary>\n\n"
-                f"{row['detail']}\n\n"
-                "</details>"
-            )
+            chunks = _chunk_markdown(row["detail"], DETAIL_CHUNK_LIMIT)
+            for i, chunk in enumerate(chunks):
+                part = f" (part {i + 1}/{len(chunks)})" if len(chunks) > 1 else ""
+                blocks.append(self._wrap_details(name, row, chunk, part))
+        return blocks
+
+    def _check_detail_blocks(self) -> List[str]:
+        """Detail blocks for the check run output, which cannot be split;
+        each definition's detail is capped at max_detail_chars."""
+        blocks = []
+        for name, row in self._rows.items():
+            if not row["detail"]:
+                continue
+            body = _fence_safe_truncate(row["detail"], self.max_detail_chars)
+            blocks.append(self._wrap_details(name, row, body))
         return blocks
 
     def render_comment_bodies(self) -> List[str]:
@@ -270,7 +330,6 @@ class GithubStatusReport:
         primary = "\n".join([self.primary_marker, self._header(), self._table(), ""])
         bodies = [primary]
         for block in self._detail_blocks():
-            block = block[:BODY_BUDGET]
             if len(bodies[-1]) + len(block) + 2 <= BODY_BUDGET:
                 bodies[-1] = f"{bodies[-1]}\n{block}"
             else:
@@ -290,7 +349,9 @@ class GithubStatusReport:
 
     def render_check_summary(self) -> str:
         """Render the check run output markdown (the job summary surface)."""
-        body = "\n".join([self._header(), self._table(), ""] + self._detail_blocks())
+        body = "\n".join(
+            [self._header(), self._table(), ""] + self._check_detail_blocks()
+        )
         if len(body) > BODY_BUDGET:
             # keep the table; details are available in the PR comments
             body = "\n".join(
@@ -649,7 +710,10 @@ class GithubHandler(BaseHandler):
         check.edit(
             status="completed",
             conclusion=conclusion,
-            output={"title": title[:255], "summary": summary[:BODY_BUDGET]},
+            output={
+                "title": title[:255],
+                "summary": _fence_safe_truncate(summary, BODY_BUDGET),
+            },
         )
 
     def _record_api_failure(self, context: str, exc: Exception) -> None:
