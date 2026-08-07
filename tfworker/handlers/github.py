@@ -7,8 +7,10 @@ Authenticates as a GitHub App and, for plan runs, maintains:
   queued, started at plan pre, and concluded from the plan result) so each
   definition reports its own status like Atlantis project checks
 - a live status comment on the pull request (when one is configured),
-  updated in place as each definition plans; overflow detail is split
-  across additional comments when the body exceeds GitHub's size limit
+  updated in place as each definition plans; the comment carries the
+  status table, with per-definition detail included only when
+  comment_details is enabled (split across additional comments when the
+  body exceeds GitHub's size limit)
 
 When the openai handler is also configured, its plan summary is embedded in
 the per-definition details; otherwise a trimmed copy of the plan output is
@@ -133,6 +135,10 @@ class GithubConfig(BaseModel):
         description="Name of the check run; defaults to 'tfworker/<deployment>/plan'.",
     )
     comment_marker: str = "tfworker-status"
+    comment_details: bool = Field(
+        default=False,
+        description="Include per-definition detail (plan output or AI summary) in the PR comment, split across additional comments when needed. When false the comment carries only the status table; detail lives in the check run output.",
+    )
     max_detail_chars: int = Field(
         default=8000,
         description="Maximum characters of per-definition detail included in check run output, which cannot be split. PR comments always carry the full detail, split across comments as needed.",
@@ -219,10 +225,17 @@ class GithubStatusReport:
     summary. Performs no API calls.
     """
 
-    def __init__(self, deployment: str, marker: str, max_detail_chars: int) -> None:
+    def __init__(
+        self,
+        deployment: str,
+        marker: str,
+        max_detail_chars: int,
+        include_details: bool = False,
+    ) -> None:
         self.deployment = deployment
         self.marker = marker
         self.max_detail_chars = max_detail_chars
+        self.include_details = include_details
         self.check_url: Optional[str] = None
         self._rows: dict = {}
 
@@ -329,6 +342,8 @@ class GithubStatusReport:
         plus continuation comments for detail blocks that do not fit."""
         primary = "\n".join([self.primary_marker, self._header(), self._table(), ""])
         bodies = [primary]
+        if not self.include_details:
+            return bodies
         for block in self._detail_blocks():
             if len(bodies[-1]) + len(block) + 2 <= BODY_BUDGET:
                 bodies[-1] = f"{bodies[-1]}\n{block}"
@@ -437,6 +452,7 @@ class GithubHandler(BaseHandler):
                 deployment=deployment,
                 marker=self.config.comment_marker,
                 max_detail_chars=self.config.max_detail_chars,
+                include_details=self.config.comment_details,
             )
             for defn in definitions.values():
                 self._report.ensure(defn.name)

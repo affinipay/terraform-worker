@@ -191,8 +191,25 @@ class TestGithubStatusReport:
         assert summary.count("```") % 2 == 0
         assert "line three" not in summary
 
-    def test_oversized_detail_splits_across_comments_without_loss(self):
+    def test_details_excluded_from_comment_by_default(self):
         report = self.make_report()
+        report.mark(
+            "def1",
+            "changes",
+            plan_line="Plan: 1 to add",
+            detail="```\nsecret plan\n```",
+        )
+
+        bodies = report.render_comment_bodies()
+
+        assert len(bodies) == 1
+        assert "secret plan" not in bodies[0]
+        assert "| `def1` | 📝 changes | Plan: 1 to add |" in bodies[0]
+        # the check run output still carries the detail
+        assert "secret plan" in report.render_check_summary()
+
+    def test_oversized_detail_splits_across_comments_without_loss(self):
+        report = self.make_report(include_details=True)
         lines = "\n".join(f"resource line {i}" for i in range(100))
         report.mark(
             "def1",
@@ -216,7 +233,7 @@ class TestGithubStatusReport:
         assert "(part 1/" in joined
 
     def test_bodies_split_when_over_budget(self):
-        report = self.make_report(max_detail_chars=400)
+        report = self.make_report(max_detail_chars=400, include_details=True)
         for i in range(3):
             report.mark(f"def{i}", "changes", detail=f"detail-{i} " * 40)
 
