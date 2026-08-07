@@ -29,6 +29,7 @@ variables, so an empty mapping works in GitHub Actions with a configured app)::
 
 import os
 import subprocess
+import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Union
 
@@ -59,6 +60,35 @@ DETAIL_CHUNK_LIMIT = BODY_BUDGET - 1000
 
 # maximum consecutive API failures before the handler disables itself
 MAX_API_FAILURES = 3
+
+
+def _hard_wrap(text: str, width: int) -> str:
+    """Hard-wrap long lines, keeping indentation on continuation lines.
+
+    GitHub renders fenced code blocks without soft wrapping and strips
+    style attributes, so pre-wrapping is the only way to avoid horizontal
+    scrolling on check run pages. Long unbreakable tokens (ARNs, URLs)
+    are left intact rather than split.
+    """
+    if width <= 0:
+        return text
+    out: List[str] = []
+    for line in text.splitlines():
+        if len(line) <= width:
+            out.append(line)
+            continue
+        indent = line[: len(line) - len(line.lstrip())] + "    "
+        out.extend(
+            textwrap.wrap(
+                line,
+                width=width,
+                subsequent_indent=indent,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            or [line]
+        )
+    return "\n".join(out)
 
 
 def _fence_safe_truncate(text: str, limit: int) -> str:
@@ -142,6 +172,10 @@ class GithubConfig(BaseModel):
     max_detail_chars: int = Field(
         default=8000,
         description="Maximum characters of per-definition detail included in check run output, which cannot be split. PR comments always carry the full detail, split across comments as needed.",
+    )
+    wrap_width: int = Field(
+        default=120,
+        description="Hard-wrap fenced plan and error output at this column so check run pages do not scroll horizontally. 0 disables wrapping.",
     )
     required: bool = False
 
@@ -558,7 +592,9 @@ class GithubHandler(BaseHandler):
             self._conclude_def_check(definition.name, "success", "No changes.")
         elif result.has_changes():
             text = strip_ansi(result.stdout_str)
-            detail = self._summary_for(definition) or self._trimmed_plan(text)
+            detail = self._summary_for(definition) or self._trimmed_plan(
+                text, self.config.wrap_width
+            )
             plan_line = self._plan_line(text)
             self._report.mark(
                 definition.name,
@@ -614,7 +650,7 @@ class GithubHandler(BaseHandler):
         return ""
 
     @staticmethod
-    def _trimmed_plan(text: str) -> str:
+    def _trimmed_plan(text: str, wrap_width: int = 0) -> str:
         """Trim plan output to the planned actions, fenced for markdown."""
         capture = False
         trimmed = ""
@@ -628,13 +664,12 @@ class GithubHandler(BaseHandler):
                 trimmed += line + "\n"
         if not trimmed:
             return ""
-        return f"```\n{trimmed}```"
+        return f"```\n{_hard_wrap(trimmed.rstrip(), wrap_width)}\n```"
 
-    @staticmethod
-    def _error_detail(result: "TerraformResult") -> str:
+    def _error_detail(self, result: "TerraformResult") -> str:
         text = strip_ansi(result.stderr_str or result.stdout_str)
         lines = [line for line in text.splitlines() if line.strip()]
-        snippet = "\n".join(lines[-20:])
+        snippet = _hard_wrap("\n".join(lines[-20:]), self.config.wrap_width)
         return f"```\n{snippet}\n```" if snippet else ""
 
     ###########################################################################

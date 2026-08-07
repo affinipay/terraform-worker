@@ -277,6 +277,51 @@ class TestGithubStatusReport:
         assert "Detail sections omitted" in summary
 
 
+class TestHardWrap:
+    def test_short_lines_untouched(self):
+        from tfworker.handlers.github import _hard_wrap
+
+        text = 'resource "aws_s3_bucket" "b" {\n  bucket = "short"\n}'
+        assert _hard_wrap(text, 120) == text
+
+    def test_long_line_wrapped_with_indent(self):
+        from tfworker.handlers.github import _hard_wrap
+
+        line = "      query = " + "sum:metric{tag} " * 20
+        out = _hard_wrap(line, 80)
+        lines = out.splitlines()
+        assert len(lines) > 1
+        assert all(len(ln) <= 80 for ln in lines)
+        assert all(ln.startswith("      ") for ln in lines)
+        assert lines[1].startswith("          ")
+
+    def test_zero_width_disables_wrapping(self):
+        from tfworker.handlers.github import _hard_wrap
+
+        line = "x" * 300
+        assert _hard_wrap(line, 0) == line
+
+    def test_unbreakable_token_left_intact(self):
+        from tfworker.handlers.github import _hard_wrap
+
+        arn = "arn:aws:iam::123456789012:role/" + "a" * 150
+        assert arn in _hard_wrap(f"role = {arn}", 80)
+
+    def test_trimmed_plan_wraps_long_lines(self):
+        text = (
+            "Terraform will perform the following actions:\n"
+            + "  attribute = "
+            + "value " * 40
+            + "\n"
+            + "Plan: 1 to add, 0 to change, 0 to destroy.\n"
+        )
+        out = GithubHandler._trimmed_plan(text, wrap_width=60)
+        assert all(
+            len(line) <= 60 for line in out.splitlines() if not line.startswith("```")
+        )
+        assert out.count("value") == 40
+
+
 class TestMarkdownHelpers:
     def test_chunk_markdown_under_limit_is_single_chunk(self):
         assert _chunk_markdown("short", 100) == ["short"]
