@@ -669,3 +669,61 @@ class TestGithubHandlerTeardown:
         handler._report = None
         handler.teardown("dep", "/tmp")
         handler._check.edit.assert_not_called()
+
+
+class TestClaimComments:
+    """Claiming is scoped to the deployment: several deployments report to one
+    PR and each owns its own comments."""
+
+    @staticmethod
+    def _comment(body):
+        comment = mock.Mock()
+        comment.body = body
+        return comment
+
+    def _issue_with(self, *bodies):
+        issue = mock.Mock()
+        issue.get_comments.return_value = [self._comment(b) for b in bodies]
+        return issue
+
+    def test_claims_only_this_deployments_comments(self):
+        handler = make_handler()
+        handler._report = GithubStatusReport(
+            deployment="apps-ai-prod", marker="tfworker-status", max_detail_chars=8000
+        )
+        mine = "<!-- tfworker-status: apps-ai-prod -->\n## status"
+        mine_part = "<!-- tfworker-status: apps-ai-prod part=2 -->\ndetail"
+        theirs = "<!-- tfworker-status: apps-ai-staging -->\n## status"
+        theirs_part = "<!-- tfworker-status: apps-ai-staging part=2 -->\ndetail"
+        handler._issue = self._issue_with(theirs, mine, theirs_part, mine_part)
+
+        handler._claim_comments()
+
+        assert [c.body for c in handler._comments] == [mine, mine_part]
+
+    def test_does_not_claim_a_deployment_it_merely_prefixes(self):
+        handler = make_handler()
+        handler._report = GithubStatusReport(
+            deployment="apps-ai", marker="tfworker-status", max_detail_chars=8000
+        )
+        handler._issue = self._issue_with(
+            "<!-- tfworker-status: apps-ai-staging -->\n## status"
+        )
+
+        handler._claim_comments()
+
+        assert handler._comments == []
+
+    def test_ignores_unrelated_comments(self):
+        handler = make_handler()
+        handler._issue = self._issue_with("just a human comment", "")
+
+        handler._claim_comments()
+
+        assert handler._comments == []
+
+    def test_noop_without_report_or_issue(self):
+        handler = make_handler()
+        handler._report = None
+        handler._claim_comments()
+        assert handler._comments == []
