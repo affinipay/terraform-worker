@@ -219,6 +219,33 @@ class TestCheckPlan:
         handler._check_plan("dep", definition)
         assert not planfile.exists()
 
+    def test_force_plan_discards_saved_plan_without_downloading(
+        self, handler_with_bucket, mock_app_state, tmp_path, monkeypatch
+    ):
+        """A forced plan drops the saved plan up front: _post_plan only uploads
+        when terraform reports changes, so a forced plan finding none would
+        otherwise leave the superseded plan available to a later apply."""
+        handler, _ = handler_with_bucket
+        mock_app_state.terraform_options.force_plan = True
+        planfile = tmp_path / "plan.tfplan"
+        planfile.write_text("stale local plan")
+        definition = MagicMock()
+        definition.name = "def"
+        definition.plan_file = str(planfile)
+
+        get_mock = MagicMock()
+        monkeypatch.setattr(handler, "_s3_get_plan", get_mock)
+        with patch.object(handler, "_s3_delete_plan", return_value=True) as del_mock:
+            handler._check_plan("dep", definition)
+
+        # the non-empty local plan is replaced rather than raising
+        assert not planfile.exists()
+        get_mock.assert_not_called()
+        remotefile = handler.get_remote_file("def")
+        deleted = [call.args[0] for call in del_mock.call_args_list]
+        assert remotefile in deleted
+        assert remotefile.replace(".tfplan", ".log") in deleted
+
     def test_downloaded_bad_lineage_removed(
         self, handler_with_bucket, tmp_path, monkeypatch
     ):
