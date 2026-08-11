@@ -167,12 +167,31 @@ class S3Handler(BaseHandler):
                     result=result,
                 )
 
+    def _force_plan(self) -> bool:
+        """Whether this run plans regardless of any saved plan."""
+        return bool(getattr(self.app_state.terraform_options, "force_plan", False))
+
     def _check_plan(self, deployment: str, definition: "Definition", **kwargs):
         """check_plan runs while the plan is being checked, it should fetch a file from the backend and store it in the local location"""
-        # ensure planfile does not exist or is zero bytes if it does
         remotefile = self.get_remote_file(definition.name)
         statefile = f"{self.prefix}/{definition.name}/terraform.tfstate"
         planfile = Path(definition.plan_file)
+
+        if self._force_plan():
+            # A forced plan supersedes the saved one, so drop it now rather than
+            # relying on the upload: _post_plan only uploads when terraform
+            # reports changes, so a forced plan that finds none would otherwise
+            # leave the superseded plan in place for a later apply to run.
+            if planfile.exists():
+                planfile.unlink()
+            if self._s3_delete_plan(remotefile):
+                log.debug(
+                    f"forced plan: discarded saved plan s3://{self.bucket}/{remotefile}"
+                )
+            self._s3_delete_plan(remotefile.replace(".tfplan", ".log"))
+            return None
+
+        # ensure planfile does not exist or is zero bytes if it does
         if planfile.exists():
             if planfile.stat().st_size == 0:
                 planfile.unlink()

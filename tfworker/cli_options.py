@@ -322,10 +322,10 @@ class CLIOptionsTerraform(FreezableBaseModel):
         json_schema_extra={"env": "WORKER_PLAN_DESTROY"},
         description="Create a destroy plan (mutually exclusive with --plan)",
     )
-    force: bool = Field(
+    force_plan: bool = Field(
         False,
-        json_schema_extra={"env": "WORKER_FORCE"},
-        description="Force apply/destroy without plan change",
+        json_schema_extra={"env": "WORKER_FORCE_PLAN"},
+        description="Plan even when a saved plan is available, replacing the saved plan",
     )
     plan_file_path: Optional[str] = Field(
         None,

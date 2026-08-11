@@ -78,6 +78,7 @@ def mock_cli_options_terraform():
     mock_terraform.apply = True
     mock_terraform.destroy = False
     mock_terraform.plan_file_path = None
+    mock_terraform.force_plan = False
     return mock_terraform
 
 
