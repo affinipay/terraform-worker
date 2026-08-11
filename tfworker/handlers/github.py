@@ -490,6 +490,9 @@ class GithubHandler(BaseHandler):
             )
             for defn in definitions.values():
                 self._report.ensure(defn.name)
+            # After the report exists: claiming comments needs the deployment to
+            # scope the marker it matches on.
+            self._claim_comments()
 
             head_sha = self._resolve_sha(working_dir)
             check_name = self.config.check_run_name or f"tfworker/{deployment}/plan"
@@ -691,7 +694,6 @@ class GithubHandler(BaseHandler):
         if self.config.pull_request:
             self._pr = self._repo.get_pull(self.config.pull_request)
             self._issue = self._repo.get_issue(self.config.pull_request)
-            self._claim_comments()
 
     def _resolve_sha(self, working_dir: str) -> str:
         if self.config.commit_sha:
@@ -715,18 +717,27 @@ class GithubHandler(BaseHandler):
         )
 
     def _claim_comments(self) -> None:
-        """Find existing status comments (from a prior run on this PR) so they
-        are edited in place rather than duplicated."""
-        report_prefix = f"<!-- {self.config.comment_marker}:"
+        """Find this deployment's existing status comments (from a prior run on
+        this PR) so they are edited in place rather than duplicated.
+
+        Matching is scoped to the deployment. Several deployments can report to
+        one PR -- a plan covering apps-ai-staging and apps-ai-prod, say -- and
+        each owns its own comments; an unscoped match makes whichever runs last
+        take over the first one's comments and delete its continuations.
+        """
+        if self._issue is None or self._report is None:
+            return
+        primary_marker = self._report.primary_marker
+        part_prefix = f"{self._report.marker_prefix()} part="
         primary, parts = None, []
         for comment in self._issue.get_comments():
-            body = comment.body or ""
-            if not body.startswith(report_prefix):
-                continue
-            if "part=" in body.splitlines()[0]:
-                parts.append(comment)
-            else:
+            # The marker is always the whole first line; match it exactly so one
+            # deployment cannot claim another whose name it prefixes.
+            first_line = (comment.body or "").split("\n", 1)[0].strip()
+            if first_line == primary_marker:
                 primary = comment
+            elif first_line.startswith(part_prefix):
+                parts.append(comment)
         self._comments = ([primary] if primary else []) + parts
 
     def _update_comments(self) -> None:
