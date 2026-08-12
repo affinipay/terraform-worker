@@ -327,10 +327,10 @@ class TestDiffFormat:
         from tfworker.handlers.github import _diff_format
 
         text = (
-            "  + resource \"a\" \"b\" {\n"
-            "  - resource \"c\" \"d\" {\n"
-            "  ~ resource \"e\" \"f\" {\n"
-            "-/+ resource \"g\" \"h\" {\n"
+            '  + resource "a" "b" {\n'
+            '  - resource "c" "d" {\n'
+            '  ~ resource "e" "f" {\n'
+            '-/+ resource "g" "h" {\n'
             "  # comment line\n"
             "      + attr = 1\n"
         )
@@ -366,8 +366,7 @@ class TestCheckUrl:
         check.html_url = "https://github.com/myorg/myrepo/runs/93896934944"
         check.id = 93896934944
         assert handler._check_url(check) == (
-            "https://github.com/myorg/myrepo/pull/7"
-            "/checks?check_run_id=93896934944"
+            "https://github.com/myorg/myrepo/pull/7/checks?check_run_id=93896934944"
         )
 
     def test_no_pull_request_keeps_html_url(self):
