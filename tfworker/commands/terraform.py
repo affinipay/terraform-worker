@@ -153,6 +153,7 @@ class TerraformCommand(BaseCommand):
                     self._terraform_init_single(name)
                 except TFWorkerException as e:
                     log.error(f"Error with definition {name}: {e}")
+                    self._report_init_failure(name, e)
                     self.ctx.exit(1)
             return
 
@@ -160,6 +161,7 @@ class TerraformCommand(BaseCommand):
 
         # Phase 1: Prepare all definitions in parallel (file operations)
         log.info("Phase 1: Preparing definition files in parallel")
+        prepare_failures: dict[str, Exception] = {}
         with ThreadPoolExecutor(
             max_workers=self.app_state.loaded_config.parallel_options.max_preparation_workers
         ) as executor:
@@ -168,14 +170,21 @@ class TerraformCommand(BaseCommand):
                 future = executor.submit(self._prepare_definition, def_prep, name)
                 prepare_futures.append((name, future))
 
-            # Wait for all preparations to complete
+            # Wait for all preparations to complete; collect every failure
+            # rather than aborting on the first so reporting handlers see the
+            # full set of definitions that failed to prepare
             for name, future in prepare_futures:
                 try:
                     future.result()
                     log.debug(f"Completed preparation for definition: {name}")
                 except Exception as e:
                     log.error(f"Error preparing definition {name}: {e}")
-                    self.ctx.exit(1)
+                    prepare_failures[name] = e
+
+        if prepare_failures:
+            for name, error in prepare_failures.items():
+                self._report_init_failure(name, error)
+            self.ctx.exit(1)
 
         # Phase 2: Run terraform init in parallel (smaller pool)
         log.info("Phase 2: Running terraform init in parallel")
@@ -304,6 +313,7 @@ class TerraformCommand(BaseCommand):
 
             except (TFWorkerException, KeyError) as e:
                 log.error(f"Error initializing definition {name}: {e}")
+                self._report_init_failure(name, e)
                 self.ctx.exit(1)
 
     def _log_terraform_result(self, name: str, result: "TerraformResult") -> None:
@@ -433,6 +443,21 @@ class TerraformCommand(BaseCommand):
                 Path(definition.plan_file).unlink(missing_ok=True)
 
         return result
+
+    def _report_init_failure(self, name: str, error: Exception) -> None:
+        """
+        Dispatch INIT/ERROR handlers for a definition that failed before its
+        terraform action could run (module download, template rendering, etc.).
+
+        The run still aborts on these failures; without this dispatch the
+        reporting handlers reach teardown with every definition pending and
+        present the aborted run as a clean run of skipped definitions.
+        """
+        self._exec_error_handlers(
+            name,
+            TerraformAction.INIT,
+            TerraformResult(exit_code=1, stdout=b"", stderr=str(error).encode()),
+        )
 
     def _exec_error_handlers(
         self,

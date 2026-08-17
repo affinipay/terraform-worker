@@ -436,7 +436,7 @@ class GithubStatusReport:
 class GithubHandler(BaseHandler):
     """Report plan progress and results to GitHub."""
 
-    actions = [TerraformAction.PLAN]
+    actions = [TerraformAction.PLAN, TerraformAction.INIT]
     config_model = GithubConfig
     _ready = False
     default_priority = {
@@ -550,18 +550,30 @@ class GithubHandler(BaseHandler):
     ) -> Union[GithubResult, None]:
         if not self._ready or self._report is None:
             return None
-        if action != TerraformAction.PLAN:
+        # INIT is only interesting when it fails: a prepare/init failure aborts
+        # the run, and without a failed row the aborted run concludes "success"
+        # with every definition skipped
+        if action not in (TerraformAction.PLAN, TerraformAction.INIT):
             return None
         try:
-            if stage == TerraformStage.PRE:
+            if stage == TerraformStage.PRE and action == TerraformAction.PLAN:
                 self._report.mark(definition.name, "running")
                 if definition.name in self._def_checks:
                     self._def_checks[definition.name].edit(status="in_progress")
                 self._update_comments()
                 return None
-            if stage == TerraformStage.POST and result is not None:
+            if (
+                stage == TerraformStage.POST
+                and action == TerraformAction.PLAN
+                and result is not None
+            ):
                 return self._post_plan(definition, result)
             if stage == TerraformStage.ERROR and result is not None:
+                title = (
+                    "Terraform init failed"
+                    if action == TerraformAction.INIT
+                    else "Terraform plan failed"
+                )
                 self._report.mark(
                     definition.name,
                     "failed",
@@ -570,7 +582,7 @@ class GithubHandler(BaseHandler):
                 self._conclude_def_check(
                     definition.name,
                     "failure",
-                    "Terraform plan failed",
+                    title,
                     self._error_detail(result),
                 )
                 self._update_comments()
