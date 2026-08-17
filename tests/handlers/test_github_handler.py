@@ -322,6 +322,66 @@ class TestHardWrap:
         assert out.count("value") == 40
 
 
+class TestDiffFormat:
+    def test_markers_hoisted_to_column_zero(self):
+        from tfworker.handlers.github import _diff_format
+
+        text = (
+            '  + resource "a" "b" {\n'
+            '  - resource "c" "d" {\n'
+            '  ~ resource "e" "f" {\n'
+            '-/+ resource "g" "h" {\n'
+            "  # comment line\n"
+            "      + attr = 1\n"
+        )
+        out = _diff_format(text).splitlines()
+        assert out[0].startswith("+  ")
+        assert out[1].startswith("-  ")
+        assert out[2].startswith("!  ")
+        # -/+ has no leading indent, left alone
+        assert out[3].startswith("-/+")
+        assert out[4] == "  # comment line"
+        assert out[5].startswith("+      ")
+
+    def test_replace_marker_with_indent_becomes_bang(self):
+        from tfworker.handlers.github import _diff_format
+
+        assert _diff_format('  -/+ resource "g" "h" {').startswith("!  ")
+
+    def test_trimmed_plan_uses_diff_fence(self):
+        text = (
+            "Terraform will perform the following actions:\n"
+            '  + resource "null_resource" "example" {\n'
+            "Plan: 1 to add, 0 to change, 0 to destroy.\n"
+        )
+        out = GithubHandler._trimmed_plan(text)
+        assert out.startswith("```diff\n")
+        assert '\n+   resource "null_resource" "example" {\n' in out
+
+
+class TestCheckUrl:
+    def test_pr_scoped_url(self):
+        handler = make_handler()
+        check = mock.Mock()
+        check.html_url = "https://github.com/myorg/myrepo/runs/93896934944"
+        check.id = 93896934944
+        assert handler._check_url(check) == (
+            "https://github.com/myorg/myrepo/pull/7/checks?check_run_id=93896934944"
+        )
+
+    def test_no_pull_request_keeps_html_url(self):
+        handler = make_handler(config=make_config(pull_request=None), with_pr=False)
+        check = mock.Mock()
+        check.html_url = "https://github.com/myorg/myrepo/runs/1"
+        assert handler._check_url(check) == "https://github.com/myorg/myrepo/runs/1"
+
+    def test_unrecognized_url_left_alone(self):
+        handler = make_handler()
+        check = mock.Mock()
+        check.html_url = "https://github.test/check/1"
+        assert handler._check_url(check) == "https://github.test/check/1"
+
+
 class TestMarkdownHelpers:
     def test_chunk_markdown_under_limit_is_single_chunk(self):
         assert _chunk_markdown("short", 100) == ["short"]

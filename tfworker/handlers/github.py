@@ -28,6 +28,7 @@ variables, so an empty mapping works in GitHub Actions with a configured app)::
 """
 
 import os
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -89,6 +90,23 @@ def _hard_wrap(text: str, width: int) -> str:
             or [line]
         )
     return "\n".join(out)
+
+
+# terraform plan change markers, optionally indented: +, -, ~, -/+, +/-
+_PLAN_MARKER = re.compile(r"^( +)([+~-]|[+-]/[+-]) ", re.MULTILINE)
+
+
+def _diff_format(text: str) -> str:
+    """Hoist terraform's change markers to column 0 (update/replace markers
+    become ``!``) so GitHub's ```diff fenced-block highlighting colors them."""
+
+    def _sub(m: "re.Match") -> str:
+        marker = m.group(2)
+        if marker not in ("+", "-"):
+            marker = "!"
+        return f"{marker}{m.group(1)} "
+
+    return _PLAN_MARKER.sub(_sub, text)
 
 
 def _fence_safe_truncate(text: str, limit: int) -> str:
@@ -505,7 +523,7 @@ class GithubHandler(BaseHandler):
                     "summary": self._report.render_check_summary(),
                 },
             )
-            self._report.check_url = self._check.html_url
+            self._report.check_url = self._check_url(self._check)
             for defn in definitions.values():
                 check = self._repo.create_check_run(
                     name=f"{check_name}: {defn.name}",
@@ -513,7 +531,7 @@ class GithubHandler(BaseHandler):
                     status="queued",
                 )
                 self._def_checks[defn.name] = check
-                self._report.set_url(defn.name, check.html_url)
+                self._report.set_url(defn.name, self._check_url(check))
             self._update_comments()
         except Exception as e:
             log.error(f"github handler setup failed: {e}")
@@ -622,8 +640,8 @@ class GithubHandler(BaseHandler):
             action=TerraformAction.PLAN,
             stage=TerraformStage.POST,
             definition=definition.name,
-            check_run_url=self._check.html_url if self._check else None,
-            definition_check_url=def_check.html_url if def_check else None,
+            check_run_url=self._check_url(self._check) if self._check else None,
+            definition_check_url=self._check_url(def_check) if def_check else None,
             comment_url=self._comments[0].html_url if self._comments else None,
         )
 
@@ -667,7 +685,7 @@ class GithubHandler(BaseHandler):
                 trimmed += line + "\n"
         if not trimmed:
             return ""
-        return f"```\n{_hard_wrap(trimmed.rstrip(), wrap_width)}\n```"
+        return f"```diff\n{_hard_wrap(_diff_format(trimmed.rstrip()), wrap_width)}\n```"
 
     def _error_detail(self, result: "TerraformResult") -> str:
         text = strip_ansi(result.stderr_str or result.stdout_str)
@@ -678,6 +696,18 @@ class GithubHandler(BaseHandler):
     ###########################################################################
     # github api plumbing
     ###########################################################################
+    def _check_url(self, check) -> str:
+        """Prefer the PR-scoped check view (.../pull/N/checks?check_run_id=X)
+        over the generic runs page when a pull request is configured."""
+        url = check.html_url
+        if self.config.pull_request and url and "/runs/" in url:
+            base = url.split("/runs/", 1)[0]
+            return (
+                f"{base}/pull/{self.config.pull_request}"
+                f"/checks?check_run_id={check.id}"
+            )
+        return url
+
     def _connect(self) -> None:
         from github import Auth, GithubIntegration
 
