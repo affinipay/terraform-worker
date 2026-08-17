@@ -519,6 +519,51 @@ class TestGithubHandlerExecute:
         assert row["status"] == "failed"
         assert "bad provider" in row["detail"]
 
+    def test_init_error_stage_marks_failed_and_concludes_check(self):
+        handler = make_handler()
+        handler.execute(
+            action=TerraformAction.INIT,
+            stage=TerraformStage.ERROR,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=TerraformResult(1, b"", b"Error: Failed to download module\n"),
+        )
+        row = handler._report._rows["mydef"]
+        assert row["status"] == "failed"
+        assert "Failed to download module" in row["detail"]
+        kwargs = handler._def_checks["mydef"].edit.call_args.kwargs
+        assert kwargs["conclusion"] == "failure"
+        assert kwargs["output"]["title"] == "Terraform init failed"
+
+    def test_init_pre_and_post_stages_are_ignored(self):
+        handler = make_handler()
+        for stage in (TerraformStage.PRE, TerraformStage.POST):
+            handler.execute(
+                action=TerraformAction.INIT,
+                stage=stage,
+                deployment="dep",
+                definition=make_definition(),
+                working_dir="/tmp",
+                result=TerraformResult(0, b"", b""),
+            )
+        assert handler._report._rows["mydef"]["status"] == "pending"
+        handler._def_checks["mydef"].edit.assert_not_called()
+
+    def test_teardown_after_init_failure_concludes_failure(self):
+        handler = make_handler()
+        handler.execute(
+            action=TerraformAction.INIT,
+            stage=TerraformStage.ERROR,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=TerraformResult(1, b"", b"Error: boom\n"),
+        )
+        handler.teardown("dep", "/tmp")
+        kwargs = handler._check.edit.call_args.kwargs
+        assert kwargs["conclusion"] == "failure"
+
     def test_no_pr_skips_comments_but_updates_check(self):
         handler = make_handler(with_pr=False)
         handler.execute(

@@ -656,6 +656,62 @@ class TestTerraformCommandMethods:
         assert prepare_mock.call_count == 4
         assert init_mock.call_count == 4
 
+    def test_terraform_init_sequential_prepare_failure_dispatches_init_error(
+        self, tmp_path, mocker
+    ):
+        cmd = make_command(tmp_path)
+        mocker.patch.object(
+            cmd,
+            "_prepare_definition",
+            side_effect=TFWorkerException("could not download modules"),
+        )
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        h = cmd.app_state.handlers
+        with pytest.raises(SystemExit):
+            cmd.terraform_init()
+        cmd.ctx.exit.assert_called_with(1)
+        init_mock.assert_not_called()
+        error_calls = [
+            c
+            for c in h.exec_handlers.call_args_list
+            if c.kwargs.get("stage") == TerraformStage.ERROR
+        ]
+        assert len(error_calls) == 1
+        assert error_calls[0].kwargs["action"] == TerraformAction.INIT
+        assert b"could not download modules" in error_calls[0].kwargs["result"].stderr
+
+    def test_terraform_init_parallel_prepare_failure_reports_every_failure(
+        self, tmp_path, mocker
+    ):
+        cmd = make_command(tmp_path)
+        for i in range(2, 5):
+            cmd.app_state.definitions[f"def{i}"] = Definition(
+                name=f"def{i}", path="module"
+            )
+
+        def prepare(def_prep, name):
+            if name in ("def2", "def3"):
+                raise TFWorkerException(f"could not download modules for {name}")
+
+        mocker.patch.object(cmd, "_prepare_definition", side_effect=prepare)
+        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        h = cmd.app_state.handlers
+        with pytest.raises(SystemExit):
+            cmd.terraform_init()
+        cmd.ctx.exit.assert_called_with(1)
+        # aborted before phase 2: nothing proceeds to terraform init
+        init_mock.assert_not_called()
+        error_calls = [
+            c
+            for c in h.exec_handlers.call_args_list
+            if c.kwargs.get("stage") == TerraformStage.ERROR
+        ]
+        # every failed preparation is reported, not just the first
+        assert {c.kwargs["definition"].name for c in error_calls} == {"def2", "def3"}
+        for c in error_calls:
+            assert c.kwargs["action"] == TerraformAction.INIT
+            assert c.kwargs["result"].exit_code == 1
+
     def test_terraform_init_proceeds_no_local_plan_and_handler_has_plan(
         self, tmp_path, mocker
     ):
