@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import click
 import pytest
 
 import tfworker.util.log as log
@@ -110,6 +111,8 @@ def make_command(tmp_path, **opts_overrides):
             self.limit = None
             self.plan_failures = True
             self.fail_on_plan_error = True
+            self.init_failures = True
+            self.fail_on_init_error = True
             for k, v in opts_overrides.items():
                 setattr(self, k, v)
 
@@ -633,15 +636,20 @@ class TestTerraformCommandMethods:
     def test_terraform_init(self, tmp_path, mocker):
         cmd = make_command(tmp_path)
         dp = mocker.patch("tfworker.definitions.prepare.DefinitionPrepare")
-        run = mocker.patch.object(cmd, "_exec_terraform_action")
+        run = mocker.patch.object(
+            cmd, "_exec_terraform_action", return_value=TerraformResult(0, b"", b"")
+        )
         cmd.terraform_init()
         assert dp.called
         assert run.called
+        assert cmd.app_state.definitions["def"].init_failed is False
 
     def test_terraform_init_sequential_small(self, tmp_path, mocker):
         cmd = make_command(tmp_path)
         prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
-        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        init_mock = mocker.patch.object(
+            cmd, "_terraform_init_single", return_value=TerraformResult(0, b"", b"")
+        )
         cmd.terraform_init()
         assert prepare_mock.call_count == 1
         assert init_mock.call_count == 1
@@ -651,7 +659,9 @@ class TestTerraformCommandMethods:
         for i in range(2, 5):
             cmd.app_state.definitions[f"def{i}"] = cmd.app_state.definitions["def"]
         prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
-        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        init_mock = mocker.patch.object(
+            cmd, "_terraform_init_single", return_value=TerraformResult(0, b"", b"")
+        )
         cmd.terraform_init()
         assert prepare_mock.call_count == 4
         assert init_mock.call_count == 4
@@ -674,7 +684,9 @@ class TestTerraformCommandMethods:
         )
 
         prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
-        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        init_mock = mocker.patch.object(
+            cmd, "_terraform_init_single", return_value=TerraformResult(0, b"", b"")
+        )
 
         cmd.terraform_init()
 
@@ -700,7 +712,9 @@ class TestTerraformCommandMethods:
         )
 
         prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
-        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        init_mock = mocker.patch.object(
+            cmd, "_terraform_init_single", return_value=TerraformResult(0, b"", b"")
+        )
 
         cmd.terraform_init()
 
@@ -727,7 +741,9 @@ class TestTerraformCommandMethods:
         )
 
         prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
-        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        init_mock = mocker.patch.object(
+            cmd, "_terraform_init_single", return_value=TerraformResult(0, b"", b"")
+        )
 
         cmd.terraform_init()
 
@@ -750,13 +766,263 @@ class TestTerraformCommandMethods:
         )
 
         prepare_mock = mocker.patch.object(cmd, "_prepare_definition")
-        init_mock = mocker.patch.object(cmd, "_terraform_init_single")
+        init_mock = mocker.patch.object(
+            cmd, "_terraform_init_single", return_value=TerraformResult(0, b"", b"")
+        )
 
         cmd.terraform_init()
 
         # Should prepare and init even though plans exist, because planning is enabled
         assert prepare_mock.call_count == 1
         assert init_mock.call_count == 1
+
+
+class TestTerraformInitFailures:
+    """Preparation and init failures: reporting, halting, and exit codes."""
+
+    def _make_command(self, tmp_path, count, **opts):
+        cmd = make_command(tmp_path, **opts)
+        cmd.app_state.definitions = {
+            f"def{i}": Definition(name=f"def{i}", path=f"module{i}")
+            for i in range(count)
+        }
+        return cmd
+
+    def _patch_init(self, cmd, mocker, prepare_failures=(), init_failures=()):
+        """Patch prepare/init to fail for the named definitions."""
+
+        def prepare(def_prep, name):
+            if name in prepare_failures:
+                raise TFWorkerException(f"preparation failed: bad module in {name}")
+
+        def init(name):
+            return TerraformResult(1 if name in init_failures else 0, b"", b"")
+
+        return (
+            mocker.patch.object(cmd, "_prepare_definition", side_effect=prepare),
+            mocker.patch.object(cmd, "_terraform_init_single", side_effect=init),
+        )
+
+    def test_sequential_prepare_failure_halts_and_exits(self, tmp_path, mocker):
+        """Default options: stop at the first failure, skip the rest, exit 1."""
+        cmd = self._make_command(tmp_path, 3)
+        prepare, init = self._patch_init(cmd, mocker, prepare_failures={"def0"})
+
+        with pytest.raises(SystemExit):
+            cmd.terraform_init()
+
+        cmd.ctx.exit.assert_called_with(1)
+        assert prepare.call_count == 1
+        assert init.call_count == 0
+        assert cmd.app_state.definitions["def0"].init_failed is True
+        assert cmd.app_state.definitions["def1"].init_skipped is True
+        assert cmd.app_state.definitions["def2"].init_skipped is True
+
+    def test_sequential_collects_every_failure(self, tmp_path, mocker):
+        """--no-init-failures: attempt all definitions, report all failures."""
+        cmd = self._make_command(tmp_path, 3, init_failures=False)
+        prepare, init = self._patch_init(
+            cmd, mocker, prepare_failures={"def0"}, init_failures={"def2"}
+        )
+
+        with pytest.raises(SystemExit):
+            cmd.terraform_init()
+
+        cmd.ctx.exit.assert_called_with(1)
+        assert prepare.call_count == 3
+        # def0 never prepared, so init was only attempted for def1 and def2
+        assert init.call_count == 2
+        assert cmd.app_state.definitions["def0"].init_failed is True
+        assert cmd.app_state.definitions["def1"].init_failed is False
+        assert cmd.app_state.definitions["def2"].init_failed is True
+        assert not any(d.init_skipped for d in cmd.app_state.definitions.values())
+        assert set(cmd.init_errors) == {"def0", "def2"}
+
+    def test_no_fail_on_init_error_continues_run(self, tmp_path, mocker):
+        """--no-fail-on-init-error: failures are recorded, the run continues."""
+        cmd = self._make_command(
+            tmp_path, 2, init_failures=False, fail_on_init_error=False
+        )
+        self._patch_init(cmd, mocker, prepare_failures={"def0"})
+
+        cmd.terraform_init()
+
+        cmd.ctx.exit.assert_not_called()
+        assert cmd.app_state.definitions["def0"].init_failed is True
+
+    def test_prepare_failure_dispatches_error_stage(self, tmp_path, mocker):
+        """Handlers see a failed init, not a definition that never ran."""
+        cmd = self._make_command(tmp_path, 1, fail_on_init_error=False)
+        self._patch_init(cmd, mocker, prepare_failures={"def0"})
+
+        cmd.terraform_init()
+
+        error_calls = [
+            c
+            for c in cmd.app_state.handlers.exec_handlers.call_args_list
+            if c.kwargs.get("stage") == TerraformStage.ERROR
+        ]
+        assert len(error_calls) == 1
+        assert error_calls[0].kwargs["action"] == TerraformAction.INIT
+        assert error_calls[0].kwargs["result"].exit_code == 1
+        assert b"bad module in def0" in error_calls[0].kwargs["result"].stderr
+
+    def test_init_failure_does_not_dispatch_error_stage_twice(self, tmp_path, mocker):
+        """A terraform init failure is dispatched once, by _exec_terraform_action."""
+        cmd = self._make_command(tmp_path, 1, fail_on_init_error=False)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(cmd, "_run", return_value=TerraformResult(1, b"", b"boom"))
+        mocker.patch.object(cmd, "_exec_hook")
+
+        cmd.terraform_init()
+
+        error_calls = [
+            c
+            for c in cmd.app_state.handlers.exec_handlers.call_args_list
+            if c.kwargs.get("stage") == TerraformStage.ERROR
+        ]
+        assert len(error_calls) == 1
+        assert cmd.app_state.definitions["def0"].init_failed is True
+        # the init phase, not _exec_terraform_action, owns the exit code
+        cmd.ctx.exit.assert_not_called()
+
+    def test_parallel_prepare_collects_all_failures(self, tmp_path, mocker):
+        """Every definition is prepared, so one run reports every bad module."""
+        cmd = self._make_command(tmp_path, 5)
+        prepare, init = self._patch_init(cmd, mocker, prepare_failures={"def1", "def3"})
+
+        with pytest.raises(SystemExit):
+            cmd.terraform_init()
+
+        assert prepare.call_count == 5
+        # halting on failure means terraform init is not run at all
+        assert init.call_count == 0
+        assert set(cmd.init_errors) == {"def1", "def3"}
+        assert cmd.app_state.definitions["def0"].init_skipped is True
+        cmd.ctx.exit.assert_called_with(1)
+
+    def test_parallel_init_failures_recorded(self, tmp_path, mocker):
+        """Parallel terraform init failures are recorded per definition."""
+        cmd = self._make_command(tmp_path, 4, fail_on_init_error=False)
+        prepare, init = self._patch_init(cmd, mocker, init_failures={"def2"})
+
+        cmd.terraform_init()
+
+        assert prepare.call_count == 4
+        assert init.call_count == 4
+        assert cmd.app_state.definitions["def2"].init_failed is True
+        assert cmd.app_state.definitions["def0"].init_failed is False
+        cmd.ctx.exit.assert_not_called()
+
+    def test_parallel_prepare_exception_recorded(self, tmp_path, mocker):
+        """A non tfworker exception from a worker thread is captured, not raised."""
+        cmd = self._make_command(tmp_path, 4, init_failures=False)
+        mocker.patch.object(
+            cmd, "_prepare_definition", side_effect=OSError("disk on fire")
+        )
+        mocker.patch.object(
+            cmd, "_terraform_init_single", return_value=TerraformResult(0, b"", b"")
+        )
+
+        with pytest.raises(SystemExit):
+            cmd.terraform_init()
+
+        assert len(cmd.init_errors) == 4
+        assert "disk on fire" in cmd.init_errors["def0"]
+
+    def test_parallel_init_exception_recorded(self, tmp_path, mocker):
+        """An exception raised by a parallel init worker is recorded."""
+        cmd = self._make_command(tmp_path, 4, fail_on_init_error=False)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(
+            cmd,
+            "_terraform_init_single",
+            side_effect=lambda name: (
+                TerraformResult(0, b"initialized\n", b"")
+                if name != "def1"
+                else (_ for _ in ()).throw(TFWorkerException("init blew up"))
+            ),
+        )
+        info = mocker.patch("tfworker.util.log.info")
+
+        cmd.terraform_init()
+
+        assert cmd.app_state.definitions["def1"].init_failed is True
+        assert "init blew up" in cmd.init_errors["def1"]
+        # successful output is still logged for the definitions that worked
+        info.assert_any_call("[def0] initialized")
+
+    def test_sequential_init_exception_recorded(self, tmp_path, mocker):
+        """An exception from terraform init is recorded, not raised."""
+        cmd = self._make_command(tmp_path, 1, fail_on_init_error=False)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(
+            cmd, "_terraform_init_single", side_effect=TFWorkerException("no binary")
+        )
+
+        cmd.terraform_init()
+
+        assert cmd.app_state.definitions["def0"].init_failed is True
+        assert "no binary" in cmd.init_errors["def0"]
+
+    def test_click_exit_from_prepare_is_not_captured(self, tmp_path, mocker):
+        """A handler/hook exit must not be reinterpreted as an init failure."""
+        cmd = self._make_command(tmp_path, 1)
+        mocker.patch.object(
+            cmd, "_prepare_definition", side_effect=click.exceptions.Exit(2)
+        )
+
+        with pytest.raises(click.exceptions.Exit):
+            cmd.terraform_init()
+
+        assert cmd.app_state.definitions["def0"].init_failed is False
+
+    def test_click_exit_from_init_is_not_captured(self, tmp_path, mocker):
+        """Sequential init: a handler/hook exit propagates untouched."""
+        cmd = self._make_command(tmp_path, 1)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(
+            cmd, "_terraform_init_single", side_effect=click.exceptions.Exit(2)
+        )
+
+        with pytest.raises(click.exceptions.Exit):
+            cmd.terraform_init()
+
+        assert cmd.app_state.definitions["def0"].init_failed is False
+
+    def test_click_exit_from_parallel_init_is_not_captured(self, tmp_path, mocker):
+        """Parallel init: a handler/hook exit propagates untouched."""
+        cmd = self._make_command(tmp_path, 4)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(
+            cmd, "_terraform_init_single", side_effect=click.exceptions.Exit(2)
+        )
+
+        with pytest.raises(click.exceptions.Exit):
+            cmd.terraform_init()
+
+    def test_plan_and_apply_skip_uninitialized_definitions(self, tmp_path, mocker):
+        """A definition that failed or skipped init is not planned or applied."""
+        cmd = self._make_command(tmp_path, 2, plan=True, apply=True)
+        cmd.app_state.definitions["def0"].init_failed = True
+        cmd.app_state.definitions["def1"].init_skipped = True
+        for defn in cmd.app_state.definitions.values():
+            defn.needs_apply = True
+            defn.plan_file = str(tmp_path / "plan.tfplan")
+        Path(tmp_path / "plan.tfplan").touch()
+
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (True, "reason")
+        pre_plan = mocker.patch.object(cmd, "_exec_terraform_pre_plan")
+        exec_plan = mocker.patch.object(cmd, "_exec_terraform_plan")
+        action = mocker.patch.object(cmd, "_exec_terraform_action")
+
+        cmd.terraform_plan()
+        cmd.terraform_apply_or_destroy()
+
+        pre_plan.assert_not_called()
+        exec_plan.assert_not_called()
+        action.assert_not_called()
 
 
 class TestGetDefinitionsNeedingInit:

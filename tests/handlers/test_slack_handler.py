@@ -804,6 +804,35 @@ class TestSlackHandler:
         assert rec.statuses["apply"] == "failed"
         assert "AccessDenied" in rec.error_snippet
 
+    def test_init_error_stage_reports_run_as_failed(self):
+        """A definition that never got past prepare/init must not read as a
+        clean run: the ERROR stage marks init failed, and teardown resolving
+        the rest as skipped leaves the run failed, not complete."""
+        handler = make_handler()
+        handler.setup(
+            "apps-qa",
+            {n: make_definition(n) for n in ("d1", "d2")},
+            "/tmp",
+            make_options(plan=True),
+        )
+        handler.execute(
+            TerraformAction.INIT,
+            TerraformStage.ERROR,
+            "apps-qa",
+            make_definition("d1"),
+            "/tmp",
+            result=TerraformResult(
+                1, b"", b"Error: Failed to download module from git::ssh://old-host"
+            ),
+        )
+        handler.teardown("apps-qa", "/tmp")
+
+        board = handler._board
+        assert board._records["d1"].statuses["init"] == "failed"
+        assert board._records["d1"].error_action == "init"
+        assert "old-host" in board._records["d1"].error_snippet
+        assert board.overall_status() == "failed"
+
     def test_teardown_marks_unfinished_as_skipped_and_flushes(self):
         handler = make_handler()
         handler.setup(
