@@ -14,7 +14,7 @@ from tfworker.constants import (
 )
 from tfworker.copier import Copier, CopyFactory
 from tfworker.exceptions import ReservedFileError, TFWorkerException
-from tfworker.util.system import pipe_exec, strip_ansi
+from tfworker.util.system import pipe_exec_logged, strip_ansi
 from tfworker.util.terraform import generate_terraform_lockfile
 
 if TYPE_CHECKING:
@@ -199,35 +199,27 @@ class DefinitionPrepare:
 
         definition = self._app_state.definitions[name]
         log.trace(f"downloading modules for definition {name}")
-        aggregate_output = log.json_logging_enabled()
-        effective_stream_output = stream_output and not aggregate_output
-
-        pipe_exec_kwargs = {
-            "cwd": definition.get_target_path(self._app_state.working_dir),
-            "stream_output": effective_stream_output,
-        }
-        if effective_stream_output:
-            pipe_exec_kwargs["stream_log_level"] = log.LogLevel.INFO
+        log.debug(
+            {
+                "message": f"running terraform get for {name}",
+                "definition": name,
+                "terraform_action": "get",
+            }
+        )
 
         result: TerraformResult = TerraformResult(
-            *pipe_exec(
+            *pipe_exec_logged(
                 "terraform get",
-                **pipe_exec_kwargs,
+                label="terraform get",
+                cwd=definition.get_target_path(self._app_state.working_dir),
+                stream_output=stream_output,
+                stream_log_level=log.LogLevel.DEBUG,
+                success_level=log.LogLevel.DEBUG,
+                extra={"definition": name, "terraform_action": "get"},
+                message=f"terraform get output for {name}",
+                debug_when_not_streaming=True,
             )
         )
-        if aggregate_output:
-            log.log_subprocess_result(
-                command="terraform get",
-                exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                level=log.LogLevel.ERROR if result.exit_code else log.LogLevel.INFO,
-                extra={"definition": name},
-                message=f"terraform get output for {name}",
-            )
-        elif not stream_output:
-            log.debug(f"terraform get result: {result.stdout}")
-            log.debug(f"terraform get error: {result.stderr}")
         if result.exit_code != 0:
             raise TFWorkerException(
                 f"could not download modules for definition {name}: {strip_ansi(result.stderr.decode())}"

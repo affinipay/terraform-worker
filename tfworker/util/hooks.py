@@ -17,7 +17,7 @@ import tfworker.util.log as log
 from tfworker.constants import WORKER_LOCALS_FILENAME, WORKER_TFVARS_FILENAME
 from tfworker.custom_types.terraform import TerraformAction, TerraformStage
 from tfworker.exceptions import HookError
-from tfworker.util.system import pipe_exec
+from tfworker.util.system import pipe_exec, pipe_exec_logged
 
 
 # --- Safe pipe_exec wrapper ---
@@ -674,37 +674,23 @@ def _execute_hook_script(
     log.trace(
         f"Executing hook script: {hook_script} in {hook_dir} with params {phase} {command} "
     )
-    aggregate_output = log.json_logging_enabled()
-    effective_stream_output = stream_output and not aggregate_output
-
-    pipe_exec_kwargs = {
-        "cwd": hook_dir,
-        "env": local_env,
-        "stream_output": effective_stream_output,
-    }
-    if effective_stream_output:
-        pipe_exec_kwargs["stream_log_level"] = log.LogLevel.DEBUG
-
-    exit_code, stdout, stderr = safe_pipe_exec(
+    exit_code, stdout, stderr = pipe_exec_logged(
         f"{hook_script} {phase} {command}",
-        **pipe_exec_kwargs,
+        label="hook",
+        cwd=hook_dir,
+        env=local_env,
+        stream_output=stream_output,
+        stream_log_level=log.LogLevel.DEBUG,
+        success_level=log.LogLevel.DEBUG,
+        extra={
+            "hook_script": hook_script,
+            "hook_phase": phase.value if hasattr(phase, "value") else str(phase),
+            "hook_action": (
+                command.value if hasattr(command, "value") else str(command)
+            ),
+        },
+        exec_fn=safe_pipe_exec,
     )
-
-    if aggregate_output:
-        log.log_subprocess_result(
-            command="hook",
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            level=log.LogLevel.ERROR if exit_code else log.LogLevel.DEBUG,
-            extra={
-                "hook_script": hook_script,
-                "hook_phase": phase.value if hasattr(phase, "value") else str(phase),
-                "hook_action": (
-                    command.value if hasattr(command, "value") else str(command)
-                ),
-            },
-        )
 
     # Log hook results based on exit code and debug mode
     # Always log failures at ERROR level, only log success at DEBUG level when debug=True
@@ -714,7 +700,9 @@ def _execute_hook_script(
     if should_log:
         log_level_func(f"Results from hook script: {hook_script}")
         log_level_func(f"exit code: {exit_code}")
-        if not effective_stream_output and not aggregate_output:
+        # nothing was streamed and no structured record was emitted, so this is
+        # the only place the output would appear
+        if not stream_output and not log.json_logging_enabled():
             for line in stdout.decode().splitlines():
                 log_level_func(f"stdout: {line}")
             for line in stderr.decode().splitlines():

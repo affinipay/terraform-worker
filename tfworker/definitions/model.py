@@ -71,6 +71,10 @@ class Definition(BaseModel):
     ready: bool = False
     needs_apply: bool = False
     plan_failed: bool = False
+    # preparation (copy/template/terraform get) or terraform init failed
+    init_failed: bool = False
+    # init was never attempted because an earlier failure halted the init phase
+    init_skipped: bool = False
     plan_file: Optional[Union[Path, str, None]] = None
 
     @field_serializer("plan_file")

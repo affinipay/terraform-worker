@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import jinja2
 import pytest
 
+import tfworker.util.log as log
 from tfworker.constants import (
     RESERVED_FILES,
     TF_PROVIDER_DEFAULT_LOCKFILE,
@@ -202,9 +203,7 @@ def test_create_terraform_lockfile_writes(def_prepare, mocker):
 
 
 def test_download_modules_success(mocker, def_prepare, definition):
-    mocker.patch(
-        "tfworker.definitions.prepare.pipe_exec", return_value=(0, b"out", b"err")
-    )
+    mocker.patch("tfworker.util.system.pipe_exec", return_value=(0, b"out", b"err"))
     mocker.patch(
         "tfworker.commands.terraform.TerraformResult",
         return_value=SimpleNamespace(exit_code=0, stdout=b"out", stderr=b"err"),
@@ -212,10 +211,40 @@ def test_download_modules_success(mocker, def_prepare, definition):
     def_prepare.download_modules("def1", stream_output=False)
 
 
-def test_download_modules_failure(mocker, def_prepare, definition):
+def test_download_modules_logs_at_debug(mocker, def_prepare, definition):
+    """A successful module download is not worth an info record per definition."""
+    log.log_format = log.LogFormat.JSON
+    mocker.patch("tfworker.util.system.pipe_exec", return_value=(0, b"out", b""))
     mocker.patch(
-        "tfworker.definitions.prepare.pipe_exec", return_value=(1, b"out", b"err")
+        "tfworker.commands.terraform.TerraformResult",
+        return_value=SimpleNamespace(exit_code=0, stdout=b"out", stderr=b""),
     )
+    info = mocker.patch("tfworker.util.log.info")
+    aggregate = mocker.patch("tfworker.util.system.log.log_subprocess_result")
+
+    def_prepare.download_modules("def1", stream_output=False)
+
+    info.assert_not_called()
+    assert aggregate.call_args.kwargs["level"] == log.LogLevel.DEBUG
+
+
+def test_download_modules_failure_still_logs_at_error(mocker, def_prepare, definition):
+    log.log_format = log.LogFormat.JSON
+    mocker.patch("tfworker.util.system.pipe_exec", return_value=(1, b"", b"boom"))
+    mocker.patch(
+        "tfworker.commands.terraform.TerraformResult",
+        return_value=SimpleNamespace(exit_code=1, stdout=b"", stderr=b"boom"),
+    )
+    aggregate = mocker.patch("tfworker.util.system.log.log_subprocess_result")
+
+    with pytest.raises(Exception):
+        def_prepare.download_modules("def1", stream_output=False)
+
+    assert aggregate.call_args.kwargs["level"] == log.LogLevel.ERROR
+
+
+def test_download_modules_failure(mocker, def_prepare, definition):
+    mocker.patch("tfworker.util.system.pipe_exec", return_value=(1, b"out", b"err"))
     mocker.patch(
         "tfworker.commands.terraform.TerraformResult",
         return_value=SimpleNamespace(exit_code=1, stdout=b"out", stderr=b"err"),
