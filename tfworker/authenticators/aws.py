@@ -2,7 +2,8 @@ import shlex
 from typing import Dict
 
 import boto3
-from botocore.credentials import Credentials
+from botocore.credentials import Credentials, RefreshableCredentials
+from botocore.session import get_session as get_botocore_session
 from pydantic import model_validator
 
 import tfworker.util.log as log
@@ -203,6 +204,14 @@ def _assume_role_session(
     """
     Uses the provided session to assume a role
 
+    The returned session renews its own credentials rather than keeping the
+    strings from a single assume-role call. Those expire, in an hour when the
+    caller is itself a role session, and a run that outlives them fails every
+    later AWS call with ExpiredToken. Renewal re-assumes through the session
+    passed in, so it continues for as long as that session can authenticate:
+    indefinitely for long lived keys or any refreshing credential provider,
+    and until they expire for temporary credentials supplied directly.
+
     Args:
         session (boto3.session): the session to use for the assumption
         backend (bool): whether this is for the backend. Defaults to False.
@@ -213,8 +222,6 @@ def _assume_role_session(
     Raises:
         TFWorkerException: if there is an error assuming the role
     """
-    sts_client = session.client("sts")
-
     if backend:
         assume_args = {
             "RoleArn": auth_config.backend_role_arn,
@@ -233,13 +240,33 @@ def _assume_role_session(
     if auth_config.aws_external_id:
         assume_args["ExternalId"] = auth_config.aws_external_id
 
-    role_creds = sts_client.assume_role(**assume_args)["Credentials"]
+    def refresh() -> Dict[str, str]:
+        """Assume the role, in the shape botocore expects for a refresh"""
+        role_creds = session.client("sts").assume_role(**assume_args)["Credentials"]
+        log.debug(
+            f"assumed {assume_args['RoleArn']}, credentials expire "
+            f"{role_creds['Expiration'].isoformat()}"
+        )
+        return {
+            "access_key": role_creds["AccessKeyId"],
+            "secret_key": role_creds["SecretAccessKey"],
+            "token": role_creds["SessionToken"],
+            "expiry_time": role_creds["Expiration"].isoformat(),
+        }
+
     try:
+        # the first assumption happens here, so an unusable role or source
+        # credential fails while authenticating rather than at first use
+        credentials = RefreshableCredentials.create_from_metadata(
+            metadata=refresh(),
+            refresh_using=refresh,
+            method="sts-assume-role",
+        )
+        # botocore has no public setter for a credential provider
+        botocore_session = get_botocore_session()
+        botocore_session._credentials = credentials
         new_session = boto3.Session(
-            aws_access_key_id=role_creds["AccessKeyId"],
-            aws_secret_access_key=role_creds["SecretAccessKey"],
-            aws_session_token=role_creds["SessionToken"],
-            region_name=region,
+            botocore_session=botocore_session, region_name=region
         )
     except Exception as e:
         raise TFWorkerException(f"error assuming role: {e}") from e
