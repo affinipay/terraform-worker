@@ -199,7 +199,7 @@ class DefinitionPrepare:
 
         definition = self._app_state.definitions[name]
         log.trace(f"downloading modules for definition {name}")
-        log.info(
+        log.debug(
             {
                 "message": f"running terraform get for {name}",
                 "definition": name,
@@ -213,6 +213,8 @@ class DefinitionPrepare:
                 label="terraform get",
                 cwd=definition.get_target_path(self._app_state.working_dir),
                 stream_output=stream_output,
+                stream_log_level=log.LogLevel.DEBUG,
+                success_level=log.LogLevel.DEBUG,
                 extra={"definition": name, "terraform_action": "get"},
                 message=f"terraform get output for {name}",
                 debug_when_not_streaming=True,
