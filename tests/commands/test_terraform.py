@@ -167,6 +167,7 @@ class TestTerraformCommandMethods:
         plan.write_text("orig")
         cmd.app_state.definitions["def"].plan_file = str(plan)
 
+        # this path calls pipe_exec directly, not through pipe_exec_logged
         mocker.patch(
             "tfworker.commands.terraform.pipe_exec", return_value=(0, b"o", b"e")
         )
@@ -176,15 +177,42 @@ class TestTerraformCommandMethods:
         outfile = tmp_path / "plan.tfplan.json"
         assert outfile.read_text() == "oe"
 
+    def test_run_logs_structured_context(self, tmp_path, mocker):
+        """The start record carries the definition/action; the argv is debug."""
+        cmd = make_command(tmp_path)
+        cmd.app_state.definitions["def"].plan_file = "plan"
+        mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
+        mocker.patch("tfworker.util.system.pipe_exec", return_value=(0, b"", b""))
+        info = mocker.patch("tfworker.util.log.info")
+        debug = mocker.patch("tfworker.util.log.debug")
+
+        cmd._run("def", TerraformAction.APPLY)
+
+        info.assert_called_once_with(
+            {
+                "message": "running terraform apply for def",
+                "definition": "def",
+                "terraform_action": "apply",
+            }
+        )
+        argv_records = [
+            c.args[0]
+            for c in debug.call_args_list
+            if isinstance(c.args[0], dict) and "running cmd" in c.args[0]["message"]
+        ]
+        assert len(argv_records) == 1
+        assert argv_records[0]["definition"] == "def"
+        assert argv_records[0]["terraform_action"] == "apply"
+        assert argv_records[0]["command"] == "terraform apply"
+        assert "/bin/terraform apply params" in argv_records[0]["message"]
+
     def test_run_squelch_options(self, tmp_path, mocker):
         cmd = make_command(tmp_path)
         defn = cmd.app_state.definitions["def"]
         defn.plan_file = "plan"
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
-        pe = mocker.patch(
-            "tfworker.commands.terraform.pipe_exec", return_value=(0, b"", b"")
-        )
+        pe = mocker.patch("tfworker.util.system.pipe_exec", return_value=(0, b"", b""))
 
         defn.squelch_apply_output = True
         cmd._run("def", TerraformAction.APPLY)
@@ -201,9 +229,7 @@ class TestTerraformCommandMethods:
         defn.plan_file = "plan"
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
-        pe = mocker.patch(
-            "tfworker.commands.terraform.pipe_exec", return_value=(0, b"", b"")
-        )
+        pe = mocker.patch("tfworker.util.system.pipe_exec", return_value=(0, b"", b""))
 
         cmd._run("def", TerraformAction.APPLY)
 
@@ -220,7 +246,7 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         pe = mocker.patch(
-            "tfworker.commands.terraform.pipe_exec",
+            "tfworker.util.system.pipe_exec",
             return_value=(0, b"stdout", b"stderr"),
         )
         aggregate = mocker.patch(
@@ -254,7 +280,7 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         mocker.patch(
-            "tfworker.commands.terraform.pipe_exec",
+            "tfworker.util.system.pipe_exec",
             return_value=(2, b"stdout", b"stderr"),
         )
         aggregate = mocker.patch(
@@ -287,7 +313,7 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         mocker.patch(
-            "tfworker.commands.terraform.pipe_exec",
+            "tfworker.util.system.pipe_exec",
             return_value=(1, b"stdout", b"stderr"),
         )
         aggregate = mocker.patch(
@@ -320,7 +346,7 @@ class TestTerraformCommandMethods:
 
         mocker.patch.object(TerraformCommandConfig, "get_params", return_value="params")
         mocker.patch(
-            "tfworker.commands.terraform.pipe_exec",
+            "tfworker.util.system.pipe_exec",
             return_value=(2, b"stdout", b"stderr"),
         )
         aggregate = mocker.patch(
@@ -600,6 +626,34 @@ class TestTerraformCommandMethods:
         cmd.terraform_plan()
 
         act.assert_not_called()
+
+    def test_terraform_plan_skipped_logs_at_info(self, tmp_path, mocker):
+        """A run that plans nothing says so at info; debug would hide a no-op."""
+        cmd = make_command(tmp_path, plan=False, plan_destroy=False)
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            True,
+            "no saved plans possible",
+        )
+        info = mocker.patch("tfworker.util.log.info")
+
+        cmd.terraform_plan()
+
+        assert any(
+            "no plan requested" in str(c.args[0]) for c in info.call_args_list
+        ), info.call_args_list
+
+    def test_terraform_apply_or_destroy_skipped_logs_at_info(self, tmp_path, mocker):
+        """Same for the apply phase, which is the last thing a run would do."""
+        cmd = make_command(tmp_path, apply=False, destroy=False)
+        info = mocker.patch("tfworker.util.log.info")
+
+        cmd.terraform_apply_or_destroy()
+
+        assert any(
+            "no apply or destroy requested" in str(c.args[0])
+            for c in info.call_args_list
+        ), info.call_args_list
 
     def test_terraform_apply_or_destroy(self, tmp_path, mocker):
         cmd = make_command(tmp_path, apply=True)

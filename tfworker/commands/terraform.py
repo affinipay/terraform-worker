@@ -13,7 +13,7 @@ from tfworker.commands.base import BaseCommand
 from tfworker.custom_types.terraform import TerraformAction, TerraformStage
 from tfworker.definitions import Definition
 from tfworker.exceptions import HandlerError, HookError, TFWorkerException
-from tfworker.util.system import pipe_exec
+from tfworker.util.system import pipe_exec, pipe_exec_logged
 from tfworker.util.terraform import quote_index_brackets
 
 if TYPE_CHECKING:
@@ -315,7 +315,13 @@ class TerraformCommand(BaseCommand):
             not self.app_state.terraform_options.plan
             and not self.app_state.terraform_options.plan_destroy
         ):
-            log.debug("--no-plan option specified; skipping plan execution")
+            # info, not debug: this ends the phase without touching a single
+            # definition, and a run that quietly does nothing is indistinguishable
+            # from a run that died
+            log.info(
+                "no plan requested (--no-plan and --no-plan-destroy); "
+                "no definitions will be planned"
+            )
             return
 
         for name in self.app_state.definitions.keys():
@@ -358,7 +364,12 @@ class TerraformCommand(BaseCommand):
         elif self.app_state.terraform_options.apply:
             action: TerraformAction = TerraformAction.APPLY
         else:
-            log.debug("neither apply nor destroy specified; skipping")
+            # info for the same reason as the plan phase: this is the last thing
+            # the run would have done
+            log.info(
+                "no apply or destroy requested (--no-apply and --no-destroy); "
+                "no definitions will be applied"
+            )
             return
 
         for name in self.app_state.definitions.keys():
@@ -837,11 +848,26 @@ class TerraformCommand(BaseCommand):
         # "terraform apply planfile" for both regular and destroy plans
         terraform_command = "apply" if action == TerraformAction.DESTROY else action
 
-        log.debug(
-            f"handling terraform {action} action for definition {definition_name}"
-        )
+        command = f"{self.app_state.terraform_options.terraform_bin} {terraform_command} {params}"
+        # the definition and action travel as fields so a central log can be
+        # filtered by them; the command line itself is detail for a debug run
+        context = {
+            "definition": definition_name,
+            "terraform_action": action.value,
+        }
         log.info(
-            f"running cmd: {self.app_state.terraform_options.terraform_bin} {terraform_command} {params}"
+            {
+                "message": f"running terraform {terraform_command} for {definition_name}",
+                **context,
+            }
+        )
+        log.debug(
+            {
+                "message": f"running cmd: {command}",
+                "command": f"terraform {terraform_command}",
+                "working_dir": str(working_dir),
+                **context,
+            }
         )
 
         if definition.squelch_apply_output and action == TerraformAction.APPLY:
@@ -855,45 +881,20 @@ class TerraformCommand(BaseCommand):
             )
             stream_output = False
 
-        aggregate_output = log.json_logging_enabled()
-        effective_stream_output = stream_output and not aggregate_output
-
-        pipe_exec_kwargs = {
-            "cwd": working_dir,
-            "env": self.terraform_config.env,
-            "stream_output": effective_stream_output,
-        }
-        if effective_stream_output:
-            pipe_exec_kwargs["stream_log_level"] = log.LogLevel.INFO
-
         result: TerraformResult = TerraformResult(
-            *pipe_exec(
-                f"{self.app_state.terraform_options.terraform_bin} {terraform_command} {params}",
-                **pipe_exec_kwargs,
-            )
-        )
-
-        if aggregate_output:
-            # For terraform plan, exit code 2 means changes detected (not an error)
-            # For other commands, any non-zero exit code is an error
-            if action == TerraformAction.PLAN and result.exit_code == 2:
-                log_level = log.LogLevel.INFO
-            elif result.exit_code != 0:
-                log_level = log.LogLevel.ERROR
-            else:
-                log_level = log.LogLevel.INFO
-            log.log_subprocess_result(
-                command=f"terraform {terraform_command}",
-                exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                level=log_level,
-                extra={
-                    "definition": definition_name,
-                    "terraform_action": action.value,
-                },
+            *pipe_exec_logged(
+                command,
+                label=f"terraform {terraform_command}",
+                cwd=working_dir,
+                env=self.terraform_config.env,
+                stream_output=stream_output,
+                # terraform plan returns 2 when there are changes, which is a
+                # successful plan, not a failure
+                ok_exit_codes=((0, 2) if action == TerraformAction.PLAN else (0,)),
+                extra=context,
                 message=f"terraform {terraform_command} output for {definition_name}",
             )
+        )
 
         log.debug(f"exit code: {result.exit_code}")
         return result

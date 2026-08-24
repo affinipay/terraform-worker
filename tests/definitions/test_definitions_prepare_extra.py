@@ -202,9 +202,7 @@ def test_create_terraform_lockfile_writes(def_prepare, mocker):
 
 
 def test_download_modules_success(mocker, def_prepare, definition):
-    mocker.patch(
-        "tfworker.definitions.prepare.pipe_exec", return_value=(0, b"out", b"err")
-    )
+    mocker.patch("tfworker.util.system.pipe_exec", return_value=(0, b"out", b"err"))
     mocker.patch(
         "tfworker.commands.terraform.TerraformResult",
         return_value=SimpleNamespace(exit_code=0, stdout=b"out", stderr=b"err"),
@@ -213,9 +211,7 @@ def test_download_modules_success(mocker, def_prepare, definition):
 
 
 def test_download_modules_failure(mocker, def_prepare, definition):
-    mocker.patch(
-        "tfworker.definitions.prepare.pipe_exec", return_value=(1, b"out", b"err")
-    )
+    mocker.patch("tfworker.util.system.pipe_exec", return_value=(1, b"out", b"err"))
     mocker.patch(
         "tfworker.commands.terraform.TerraformResult",
         return_value=SimpleNamespace(exit_code=1, stdout=b"out", stderr=b"err"),

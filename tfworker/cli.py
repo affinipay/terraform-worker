@@ -104,6 +104,12 @@ def terraform(ctx: click.Context, deployment: str, **kwargs):
     ctx.obj.terraform_version = tf_util.get_terraform_version(
         options.terraform_bin or "terraform"
     )
+    # attach run identity to every structured record; central logging otherwise
+    # cannot tell concurrent runs of different deployments apart
+    log.set_context(
+        deployment=deployment,
+        run_id=getattr(ctx.obj.root_options, "run_id", None),
+    )
     log.info(f"building Deployment: {deployment}")
     log_limiter()
     tfc = TerraformCommand(deployment=deployment)

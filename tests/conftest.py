@@ -7,6 +7,7 @@ import click
 import pytest
 from moto import mock_aws
 
+import tfworker.util.log as log
 from tfworker.app_state import AppState
 from tfworker.authenticators import AuthenticatorsCollection
 from tfworker.backends import Backends
@@ -199,3 +200,19 @@ def mock_click_context_backend_west(mock_app_state_backend_west):
 def setup_method(mocker, mock_click_context):
     """A fixture to setup the click context which is used throughout"""
     mocker.patch("click.get_current_context", return_value=mock_click_context)
+
+
+@pytest.fixture(autouse=True)
+def reset_log_globals():
+    """Restore the log module's globals after every test.
+
+    Level, format, and run context are module state; a test that switches to
+    JSON logging (or fails before restoring it) would otherwise change how
+    every later test behaves.
+    """
+    level, fmt = log.log_level, log.log_format
+    context = dict(log._run_context)
+    yield
+    log.log_level, log.log_format = level, fmt
+    log.clear_context()
+    log.set_context(**context)
