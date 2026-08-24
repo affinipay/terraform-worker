@@ -384,15 +384,24 @@ class TestTerraformCommandMethods:
         hexec.assert_called_once()
 
     def test_exec_hook_error(self, tmp_path, mocker):
+        """A hook failure is reported to the caller, it does not end the run."""
         cmd = make_command(tmp_path)
         defn = cmd.app_state.definitions["def"]
         mocker.patch("tfworker.commands.terraform.hooks.check_hooks", return_value=True)
         mocker.patch(
             "tfworker.commands.terraform.hooks.hook_exec", side_effect=HookError("boom")
         )
-        with pytest.raises(SystemExit):
-            cmd._exec_hook(defn, TerraformAction.APPLY, TerraformStage.PRE)
-        cmd.ctx.exit.assert_called_with(2)
+
+        assert cmd._exec_hook(defn, TerraformAction.APPLY, TerraformStage.PRE) is False
+        cmd.ctx.exit.assert_not_called()
+
+    def test_exec_hook_success(self, tmp_path, mocker):
+        cmd = make_command(tmp_path)
+        defn = cmd.app_state.definitions["def"]
+        mocker.patch("tfworker.commands.terraform.hooks.check_hooks", return_value=True)
+        mocker.patch("tfworker.commands.terraform.hooks.hook_exec")
+
+        assert cmd._exec_hook(defn, TerraformAction.APPLY, TerraformStage.PRE) is True
 
     def test_exec_terraform_action_flow(self, tmp_path, mocker):
         cmd = make_command(tmp_path)
@@ -1077,6 +1086,186 @@ class TestTerraformInitFailures:
         pre_plan.assert_not_called()
         exec_plan.assert_not_called()
         action.assert_not_called()
+
+
+class TestHookFailures:
+    """A hook failure is a failure of its phase, governed by that phase's options."""
+
+    def _fail_hooks(self, cmd, mocker, when=None):
+        """Make hooks fail, optionally only for a given (action, stage)."""
+
+        def exec_hook(definition, action, stage, result=None):
+            if when is None or when == (action, stage):
+                return False
+            return True
+
+        return mocker.patch.object(cmd, "_exec_hook", side_effect=exec_hook)
+
+    # ------------------------------------------------------------------ init
+    def test_init_pre_hook_failure_is_an_init_failure(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, init_failures=False, fail_on_init_error=False)
+        cmd.app_state.definitions["def2"] = Definition(name="def2", path="module2")
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(cmd, "_run", return_value=TerraformResult(0, b"", b""))
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.INIT, TerraformStage.PRE))
+
+        cmd.terraform_init()
+
+        for name in ("def", "def2"):
+            assert cmd.app_state.definitions[name].init_failed is True
+            assert cmd.init_errors[name] == "pre-init hook failed"
+        # the run continues; the phase decides the exit code
+        cmd.ctx.exit.assert_not_called()
+
+    def test_init_hook_failure_skips_terraform(self, tmp_path, mocker):
+        """A failed pre-init hook must not be followed by terraform init."""
+        cmd = make_command(tmp_path, fail_on_init_error=False)
+        mocker.patch.object(cmd, "_prepare_definition")
+        run = mocker.patch.object(cmd, "_run")
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.INIT, TerraformStage.PRE))
+
+        cmd.terraform_init()
+
+        run.assert_not_called()
+
+    def test_init_hook_failure_honors_fail_on_init_error(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, init_failures=False, fail_on_init_error=True)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(cmd, "_run", return_value=TerraformResult(0, b"", b""))
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.INIT, TerraformStage.PRE))
+
+        with pytest.raises(SystemExit):
+            cmd.terraform_init()
+
+        # exit 1 from the init phase, not exit 2 from the middle of a hook
+        cmd.ctx.exit.assert_called_once_with(1)
+
+    def test_init_post_hook_failure_is_an_init_failure(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, fail_on_init_error=False)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(cmd, "_run", return_value=TerraformResult(0, b"", b""))
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.INIT, TerraformStage.POST))
+
+        cmd.terraform_init()
+
+        assert cmd.app_state.definitions["def"].init_failed is True
+        assert cmd.init_errors["def"] == "post-init hook failed"
+
+    def test_init_hook_failure_dispatches_error_stage(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, fail_on_init_error=False)
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(cmd, "_run", return_value=TerraformResult(0, b"", b""))
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.INIT, TerraformStage.PRE))
+
+        cmd.terraform_init()
+
+        error_calls = [
+            c
+            for c in cmd.app_state.handlers.exec_handlers.call_args_list
+            if c.kwargs.get("stage") == TerraformStage.ERROR
+        ]
+        assert len(error_calls) == 1
+        assert error_calls[0].kwargs["action"] == TerraformAction.INIT
+        assert b"pre-init hook failed" in error_calls[0].kwargs["result"].stderr
+
+    def test_init_hook_failure_skips_plan_and_apply(self, tmp_path, mocker):
+        cmd = make_command(
+            tmp_path,
+            plan=True,
+            apply=True,
+            fail_on_init_error=False,
+            fail_on_plan_error=False,
+        )
+        mocker.patch.object(cmd, "_prepare_definition")
+        mocker.patch.object(cmd, "_run", return_value=TerraformResult(0, b"", b""))
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.INIT, TerraformStage.PRE))
+
+        cmd.terraform_init()
+        assert cmd.app_state.definitions["def"].init_failed is True
+
+        # patched after init so the hook path above ran for real
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (True, "reason")
+        pre_plan = mocker.patch.object(cmd, "_exec_terraform_pre_plan")
+        action = mocker.patch.object(cmd, "_exec_terraform_action")
+
+        cmd.terraform_plan()
+        cmd.terraform_apply_or_destroy()
+
+        pre_plan.assert_not_called()
+        action.assert_not_called()
+
+    # ------------------------------------------------------------------ plan
+    def test_pre_plan_hook_failure_marks_plan_failed(self, tmp_path, mocker):
+        cmd = make_command(
+            tmp_path, plan=True, plan_failures=False, fail_on_plan_error=False
+        )
+        cmd.app_state.definitions["def2"] = Definition(name="def2", path="module2")
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (True, "reason")
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.PLAN, TerraformStage.PRE))
+        exec_plan = mocker.patch.object(cmd, "_exec_terraform_plan")
+
+        cmd.terraform_plan()
+
+        # both definitions attempted, neither planned, no exit
+        assert exec_plan.call_count == 0
+        for name in ("def", "def2"):
+            assert cmd.app_state.definitions[name].plan_failed is True
+            assert cmd.app_state.definitions[name].needs_apply is False
+        cmd.ctx.exit.assert_not_called()
+
+    def test_pre_plan_hook_failure_halts_when_plan_failures_set(self, tmp_path, mocker):
+        cmd = make_command(
+            tmp_path, plan=True, plan_failures=True, fail_on_plan_error=False
+        )
+        cmd.app_state.definitions["def2"] = Definition(name="def2", path="module2")
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (True, "reason")
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.PLAN, TerraformStage.PRE))
+
+        cmd.terraform_plan()
+
+        assert cmd.app_state.definitions["def"].plan_failed is True
+        assert cmd.app_state.definitions["def2"].plan_failed is False
+
+    def test_pre_plan_hook_failure_honors_fail_on_plan_error(self, tmp_path, mocker):
+        cmd = make_command(
+            tmp_path, plan=True, plan_failures=False, fail_on_plan_error=True
+        )
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (True, "reason")
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.PLAN, TerraformStage.PRE))
+
+        with pytest.raises(SystemExit):
+            cmd.terraform_plan()
+
+        cmd.ctx.exit.assert_called_once_with(1)
+
+    def test_post_plan_hook_failure_prevents_apply(self, tmp_path, mocker):
+        """A plan with changes whose post hook failed must not be applied."""
+        cmd = make_command(tmp_path, plan=True, fail_on_plan_error=False)
+        defn = cmd.app_state.definitions["def"]
+        defn.plan_file = tmp_path / "plan.tfplan"
+        mocker.patch.object(cmd, "_run", return_value=TerraformResult(2, b"", b""))
+        mocker.patch.object(cmd, "_generate_plan_output_json")
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.PLAN, TerraformStage.POST))
+
+        cmd._exec_terraform_plan("def")
+
+        assert defn.plan_failed is True
+        assert defn.needs_apply is False
+
+    # --------------------------------------------------------------- apply
+    def test_apply_hook_failure_remains_fatal(self, tmp_path, mocker):
+        """Apply has no continuation options, so a hook failure ends the run."""
+        cmd = make_command(tmp_path, apply=True)
+        self._fail_hooks(cmd, mocker, when=(TerraformAction.APPLY, TerraformStage.PRE))
+
+        with pytest.raises(SystemExit):
+            cmd._exec_terraform_action("def", TerraformAction.APPLY)
+
+        cmd.ctx.exit.assert_called_with(2)
 
 
 class TestGetDefinitionsNeedingInit:

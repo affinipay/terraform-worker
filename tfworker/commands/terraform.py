@@ -331,7 +331,10 @@ class TerraformCommand(BaseCommand):
                 )
                 continue
             log.info(f"running pre-plan for definition: {name}")
-            self._exec_terraform_pre_plan(name=name)
+            if not self._exec_terraform_pre_plan(name=name):
+                if self.app_state.terraform_options.plan_failures:
+                    break
+                continue
             needed, reason = def_plan.needs_plan(self.app_state.definitions[name])
             if not needed:
                 log.info(f"Plan not needed for definition: {name}, reason: {reason}")
@@ -431,12 +434,14 @@ class TerraformCommand(BaseCommand):
 
             if result is not None and result.exit_code:
                 # _exec_terraform_action logged the output and dispatched the
-                # ERROR stage with the real result
-                self._record_init_failure(
-                    name,
-                    f"terraform init exited {result.exit_code}",
-                    dispatch_error_stage=False,
-                )
+                # ERROR stage with the real result; a hook failure has already
+                # recorded a more specific message
+                if not self.app_state.definitions[name].init_failed:
+                    self._record_init_failure(
+                        name,
+                        f"terraform init exited {result.exit_code}",
+                        dispatch_error_stage=False,
+                    )
                 continue
 
             log.debug(f"Completed terraform init for definition: {name}")
@@ -548,11 +553,12 @@ class TerraformCommand(BaseCommand):
             return False
 
         if result is not None and result.exit_code:
-            self._record_init_failure(
-                name,
-                f"terraform init exited {result.exit_code}",
-                dispatch_error_stage=False,
-            )
+            if not self.app_state.definitions[name].init_failed:
+                self._record_init_failure(
+                    name,
+                    f"terraform init exited {result.exit_code}",
+                    dispatch_error_stage=False,
+                )
             return False
         return True
 
@@ -623,11 +629,8 @@ class TerraformCommand(BaseCommand):
         log.trace(
             f"executing {TerraformStage.PRE} {action.value} hooks for definition {name}"
         )
-        self._exec_hook(
-            definition,
-            action,
-            TerraformStage.PRE,
-        )
+        if not self._exec_hook(definition, action, TerraformStage.PRE):
+            return self._hook_failure(name, action, TerraformStage.PRE, exit_on_error)
 
         log.trace(f"running terraform {action.value} for definition {name}")
         result = self._run(name, action)
@@ -670,12 +673,8 @@ class TerraformCommand(BaseCommand):
         log.trace(
             f"executing {TerraformStage.POST.value} {action.value} hooks for definition {name}"
         )
-        self._exec_hook(
-            definition,
-            action,
-            TerraformStage.POST,
-            result,
-        )
+        if not self._exec_hook(definition, action, TerraformStage.POST, result):
+            return self._hook_failure(name, action, TerraformStage.POST, exit_on_error)
 
         if action == TerraformAction.APPLY:
             if definition.plan_file is not None:
@@ -712,9 +711,12 @@ class TerraformCommand(BaseCommand):
         except Exception as e:
             log.error(f"error-stage handler error on definition {name}: {e}")
 
-    def _exec_terraform_pre_plan(self, name: str) -> None:
+    def _exec_terraform_pre_plan(self, name: str) -> bool:
         """
         Execute terraform pre plan with hooks and handlers for the given definition
+
+        Returns:
+            bool: False when a pre-plan hook failed, so the definition is not planned
         """
         definition: Definition = self.app_state.definitions[name]
 
@@ -732,11 +734,16 @@ class TerraformCommand(BaseCommand):
             self.ctx.exit(2)
 
         log.trace(f"executing pre plan hooks for definition {name}")
-        self._exec_hook(
+        if not self._exec_hook(
             self._app_state.definitions[name],
             TerraformAction.PLAN,
             TerraformStage.PRE,
-        )
+        ):
+            self._hook_failure(
+                name, TerraformAction.PLAN, TerraformStage.PRE, exit_on_error=False
+            )
+            return False
+        return True
 
     def _exec_terraform_plan(self, name: str) -> None:
         """
@@ -793,12 +800,15 @@ class TerraformCommand(BaseCommand):
             self.ctx.exit(2)
 
         log.trace(f"executing post plan hooks for definition {name}")
-        self._exec_hook(
+        if not self._exec_hook(
             self._app_state.definitions[name],
             TerraformAction.PLAN,
             TerraformStage.POST,
             result,
-        )
+        ):
+            self._hook_failure(
+                name, TerraformAction.PLAN, TerraformStage.POST, exit_on_error=False
+            )
 
     def _generate_plan_output_json(self, name) -> None:
         """
@@ -905,15 +915,21 @@ class TerraformCommand(BaseCommand):
         action: TerraformAction,
         stage: TerraformStage,
         result: Union["TerraformResult", None] = None,
-    ) -> None:
+    ) -> bool:
         """
         Find and execute the appropriate hooks for a supplied definition
+
+        A hook failure is reported to the caller rather than ending the run, so
+        the phase the hook belongs to decides what happens to the definition.
 
         Args:
             definition (Definition): the definition to execute the hooks for
             action (TerraformAction): the action to execute the hooks for
             stage (TerraformStage): the stage to execute the hooks for
             result (TerraformResult): the result of the terraform command
+
+        Returns:
+            bool: False when a hook ran and failed, True otherwise
         """
         hook_dir = definition.get_target_path(self.app_state.working_dir)
 
@@ -922,7 +938,7 @@ class TerraformCommand(BaseCommand):
                 log.trace(
                     f"no {stage}-{action} hooks found for definition {definition.name}"
                 )
-                return
+                return True
 
             log.info(
                 f"executing {stage}-{action} hooks for definition {definition.name}"
@@ -943,7 +959,53 @@ class TerraformCommand(BaseCommand):
             )
         except HookError as e:
             log.error(f"hook execution error on definition {definition.name}: \n{e}")
+            return False
+        return True
+
+    def _hook_failure(
+        self,
+        name: str,
+        action: TerraformAction,
+        stage: TerraformStage,
+        exit_on_error: bool,
+    ) -> "TerraformResult":
+        """
+        Record a hook failure as a failure of the phase the hook belongs to.
+
+        Init and plan hook failures are recorded against the definition and
+        governed by that phase's options, so a single bad hook does not end a
+        run; the definition itself is finished either way, no later phase acts
+        on it. Apply and destroy have no such options, so a hook failure there
+        remains fatal.
+
+        Args:
+            name: the definition whose hook failed
+            action: the action the hook belongs to
+            stage: the stage the hook belongs to
+            exit_on_error: end the run rather than returning the failure
+
+        Returns:
+            TerraformResult: a failing result standing in for the phase
+        """
+        definition: Definition = self.app_state.definitions[name]
+        message = f"{stage.value}-{action.value} hook failed"
+        result = TerraformResult(2, b"", message.encode())
+
+        if action == TerraformAction.INIT:
+            # marks init_failed and dispatches the ERROR stage
+            self._record_init_failure(name, message)
+        elif action == TerraformAction.PLAN:
+            definition.plan_failed = True
+            # a plan whose hook failed must not be applied, even one that
+            # already reported changes
+            definition.needs_apply = False
+            self._exec_error_handlers(name, action, result)
+        else:
+            self._exec_error_handlers(name, action, result)
+
+        if exit_on_error:
             self.ctx.exit(2)
+        return result
 
 
 class TerraformResult:
