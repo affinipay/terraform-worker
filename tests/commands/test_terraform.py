@@ -74,6 +74,23 @@ class TestTerraformCommandConfig:
         cmd._app_state.root_options.log_level = "DEBUG"
         assert cfg.debug is True
 
+    def test_env_is_not_cached(self, tmp_path):
+        """Credentials can expire, so each command resolves the env again."""
+        cmd = make_command(tmp_path)
+        calls = []
+
+        def auth_env():
+            calls.append(len(calls))
+            return {"AWS_SESSION_TOKEN": f"token-{len(calls)}"}
+
+        cmd._app_state.authenticators = [SimpleNamespace(env=auth_env)]
+        cfg = TerraformCommandConfig(cmd._app_state)
+
+        first = cfg.env["AWS_SESSION_TOKEN"]
+        second = cfg.env["AWS_SESSION_TOKEN"]
+
+        assert (first, second) == ("token-1", "token-2")
+
     def test_get_params_target(self, tmp_path, mocker):
         cmd = make_command(tmp_path)
         cfg = TerraformCommandConfig(cmd._app_state)

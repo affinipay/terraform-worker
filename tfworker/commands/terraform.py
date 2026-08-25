@@ -1062,7 +1062,6 @@ class TerraformCommandConfig:
 
     def __init__(self, app_state: "AppState"):
         self._app_state = app_state
-        self._env = None
         self._force_no_stream_output = False
 
     @classmethod
@@ -1089,9 +1088,14 @@ class TerraformCommandConfig:
 
     @property
     def env(self):
-        if self._env is None:
-            self._env = self._get_env()
-        return self._env
+        """
+        Environment for a terraform command, resolved per access.
+
+        Not cached: an authenticator may hand out credentials that expire, and
+        the environment a command inherits is fixed once it starts, so each
+        command needs the values that are current when it launches.
+        """
+        return self._get_env()
 
     @property
     def b64_encode(self):
