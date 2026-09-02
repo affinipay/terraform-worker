@@ -348,6 +348,78 @@ class TestDiffFormat:
 
         assert _diff_format('  -/+ resource "g" "h" {').startswith("!  ")
 
+    def test_output_only_plan_is_captured(self):
+        """A plan that only moves outputs has neither the resource-actions
+        heading nor a Plan: line, and used to render as nothing at all."""
+        text = (
+            "Terraform used the selected providers to generate the following\n"
+            "execution plan.\n"
+            "\n"
+            "Changes to Outputs:\n"
+            '  + oidc_provider_arns = "known after apply"\n'
+            "\n"
+            "You can apply this plan to save these new output values to the\n"
+            "Terraform state, without changing any real infrastructure.\n"
+        )
+        out = GithubHandler._trimmed_plan(text)
+        assert out.startswith("```diff\n")
+        assert "Changes to Outputs:" in out
+        assert "oidc_provider_arns" in out
+        assert "without changing any real infrastructure" not in out
+
+    def test_output_changes_after_plan_line_are_kept(self):
+        """Output changes follow the Plan: line; capture used to stop there."""
+        text = (
+            "Terraform will perform the following actions:\n"
+            '  + resource "null_resource" "example" {\n'
+            "Plan: 1 to add, 0 to change, 0 to destroy.\n"
+            "\n"
+            "Changes to Outputs:\n"
+            '  + example = "value"\n'
+        )
+        out = GithubHandler._trimmed_plan(text)
+        assert "Plan: 1 to add" in out
+        assert "Changes to Outputs:" in out
+        assert "example" in out
+
+    def test_trimmed_plan_stops_at_saved_plan_footer(self):
+        ruler = "\u2500" * 20
+        text = (
+            "Terraform will perform the following actions:\n"
+            '  + resource "null_resource" "example" {\n'
+            "Plan: 1 to add, 0 to change, 0 to destroy.\n"
+            "\n"
+            f"{ruler}\n"
+            "\n"
+            "Saved the plan to: plan.tfplan\n"
+            "\n"
+            "To perform exactly these actions, run the following command to apply:\n"
+            '    terraform apply "plan.tfplan"\n'
+        )
+        out = GithubHandler._trimmed_plan(text)
+        assert "Plan: 1 to add" in out
+        assert "Saved the plan to" not in out
+        assert "terraform apply" not in out
+        assert "\u2500" not in out
+
+    def test_plan_line_falls_back_for_output_only(self):
+        text = 'Changes to Outputs:\n  + example = "value"\n'
+        assert GithubHandler._plan_line(text) == "Output changes only."
+
+    def test_plan_line_prefers_the_plan_summary(self):
+        text = (
+            "Plan: 1 to add, 0 to change, 0 to destroy.\n" "\n" "Changes to Outputs:\n"
+        )
+        assert (
+            GithubHandler._plan_line(text)
+            == "Plan: 1 to add, 0 to change, 0 to destroy."
+        )
+
+    def test_plan_line_empty_when_no_changes(self):
+        assert (
+            GithubHandler._plan_line("No changes. Your infrastructure matches.\n") == ""
+        )
+
     def test_trimmed_plan_uses_diff_fence(self):
         text = (
             "Terraform will perform the following actions:\n"

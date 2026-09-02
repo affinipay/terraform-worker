@@ -92,6 +92,33 @@ def _hard_wrap(text: str, width: int) -> str:
     return "\n".join(out)
 
 
+OUTPUT_CHANGES_HEADING = "Changes to Outputs:"
+
+# Where the interesting part of a plan starts. A plan with resource actions uses
+# the first; a plan that only changes outputs has only the second.
+PLAN_SECTION_HEADINGS = (
+    "Terraform will perform the following actions:",
+    OUTPUT_CHANGES_HEADING,
+)
+
+# Terraform's trailing footer, which follows the changes and is not part of them.
+PLAN_FOOTER_PREFIXES = (
+    "Saved the plan to:",
+    "To perform exactly these actions",
+    "You can apply this plan to save these new output values",
+    "Note: You didn't use the -out option",
+)
+
+
+def _is_plan_footer(line: str) -> bool:
+    """Whether a line begins terraform's post-plan footer."""
+    if line.startswith(PLAN_FOOTER_PREFIXES):
+        return True
+    # The footer is preceded by a rule of box-drawing characters.
+    stripped = line.strip()
+    return bool(stripped) and set(stripped) == {"\u2500"}
+
+
 # terraform plan change markers, optionally indented: +, -, ~, -/+, +/-
 _PLAN_MARKER = re.compile(r"^( +)([+~-]|[+-]/[+-]) ", re.MULTILINE)
 
@@ -665,27 +692,38 @@ class GithubHandler(BaseHandler):
 
     @staticmethod
     def _plan_line(text: str) -> str:
+        # A plan that only changes outputs has no "Plan:" summary line at all,
+        # so fall back to naming that case rather than reporting nothing.
+        outputs_only = False
         for line in text.splitlines():
             if line.startswith("Plan:"):
                 return line.strip()
-        return ""
+            if line.startswith(OUTPUT_CHANGES_HEADING):
+                outputs_only = True
+        return "Output changes only." if outputs_only else ""
 
     @staticmethod
     def _trimmed_plan(text: str, wrap_width: int = 0) -> str:
-        """Trim plan output to the planned actions, fenced for markdown."""
+        """Trim plan output to the planned changes, fenced for markdown.
+
+        Capture starts at the resource-actions heading or, for a plan that only
+        moves outputs, at the outputs heading -- terraform emits the latter with
+        neither the former nor a "Plan:" line. Capture runs to terraform's
+        trailing footer so output changes listed after "Plan:" are kept too.
+        """
         capture = False
-        trimmed = ""
+        lines = []
         for line in text.splitlines():
-            if line.startswith("Terraform will perform the following actions:"):
+            if not capture and line.startswith(PLAN_SECTION_HEADINGS):
                 capture = True
-            if line.startswith("Plan:"):
-                trimmed += line + "\n"
+            elif capture and _is_plan_footer(line):
                 capture = False
             if capture:
-                trimmed += line + "\n"
+                lines.append(line)
+        trimmed = "\n".join(lines).rstrip()
         if not trimmed:
             return ""
-        return f"```diff\n{_hard_wrap(_diff_format(trimmed.rstrip()), wrap_width)}\n```"
+        return f"```diff\n{_hard_wrap(_diff_format(trimmed), wrap_width)}\n```"
 
     def _error_detail(self, result: "TerraformResult") -> str:
         text = strip_ansi(result.stderr_str or result.stdout_str)
