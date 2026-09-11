@@ -18,6 +18,7 @@ from tfworker.util.terraform import quote_index_brackets
 
 if TYPE_CHECKING:
     from tfworker.app_state import AppState
+    from tfworker.definitions.plan import DefinitionPlan
 
 
 class TerraformCommand(BaseCommand):
@@ -307,14 +308,16 @@ class TerraformCommand(BaseCommand):
             needed, reason = def_plan.needs_plan(self.app_state.definitions[name])
             if not needed:
                 if "plan file exists" in reason:
-                    for name in self.app_state.definitions.keys():
-                        self.app_state.definitions[name].needs_apply = True
+                    self.app_state.definitions[name].needs_apply = True
 
         # if --no-plan and --no-plan-destroy are specified, skip the plan regardless
         if (
             not self.app_state.terraform_options.plan
             and not self.app_state.terraform_options.plan_destroy
         ):
+            # a saved plan is fetched by the plan phase, which this run does not
+            # have; without this an apply-only run has nothing to apply
+            self._fetch_saved_plans(def_plan)
             # info, not debug: this ends the phase without touching a single
             # definition, and a run that quietly does nothing is indistinguishable
             # from a run that died
@@ -356,6 +359,72 @@ class TerraformCommand(BaseCommand):
                 self.app_state.definitions[name].needs_apply = False
 
         if self.app_state.terraform_options.fail_on_plan_error:
+            if any(d.plan_failed for d in self.app_state.definitions.values()):
+                self.ctx.exit(1)
+
+    def _fetch_saved_plans(self, def_plan: "DefinitionPlan") -> None:
+        """
+        Retrieve the plans a previous run saved so an apply-only run can use them.
+
+        Only the handler holding the plan is asked for it; the pre-plan stage is
+        not dispatched, as handlers such as snyk and trivy hook it to scan and a
+        run that is not planning should not trigger them.
+
+        A definition whose plan is already on disk is left alone: that is the
+        local plan file the `plan_file_path` workflow leaves behind, and it
+        takes precedence over anything a handler holds.
+
+        Failing to fetch one definition's plan is treated as that definition's
+        plan failure, so the same two options govern it as govern the plan
+        phase: `plan_failures` halts the phase, and `fail_on_plan_error` decides
+        whether the run ends non-zero. Neither applies to the apply phase
+        itself, which has no equivalent failure handling yet.
+        """
+        options = self.app_state.terraform_options
+        if not (options.apply or options.destroy):
+            return
+        if not (self.app_state.root_options.backend_plans or options.plan_file_path):
+            return
+
+        for name, definition in self.app_state.definitions.items():
+            def_plan.set_plan_file(definition)
+            needed, reason = def_plan.needs_plan(definition)
+
+            if not needed and "plan file exists" in reason:
+                definition.needs_apply = True
+                continue
+
+            if needed:
+                log.info(
+                    f"no saved plan for definition: {name}; it will not be applied"
+                )
+                definition.needs_apply = False
+                continue
+
+            try:
+                retrieved = self.app_state.handlers.get_available_plan(definition)
+            except HandlerError as e:
+                log.error(f"handler error fetching the saved plan for {name}: {e}")
+                definition.plan_failed = True
+                definition.needs_apply = False
+                if options.plan_failures:
+                    log.warn(
+                        "halting the fetch; the definitions behind "
+                        f"{name} have no plan to apply"
+                    )
+                    break
+                continue
+
+            definition.needs_apply = retrieved
+            if retrieved:
+                log.info(f"definition {name} will be applied from a saved plan")
+            else:
+                log.warn(
+                    f"saved plan for definition {name} could not be used; "
+                    "it will not be applied"
+                )
+
+        if options.fail_on_plan_error:
             if any(d.plan_failed for d in self.app_state.definitions.values()):
                 self.ctx.exit(1)
 
