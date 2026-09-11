@@ -310,11 +310,13 @@ class GithubStatusReport:
         marker: str,
         max_detail_chars: int,
         include_details: bool = False,
+        run_id: Optional[str] = None,
     ) -> None:
         self.deployment = deployment
         self.marker = marker
         self.max_detail_chars = max_detail_chars
         self.include_details = include_details
+        self.run_id = run_id
         self.check_url: Optional[str] = None
         self._rows: dict = {}
 
@@ -368,6 +370,11 @@ class GithubStatusReport:
 
     def _header(self) -> str:
         lines = [f"## Terraform plan status: `{self.deployment}`", ""]
+        if self.run_id:
+            # the id the stored plans are keyed by, so an apply can be requested
+            # for exactly the plans this run produced
+            lines.append(f"Run `{self.run_id}`")
+            lines.append("")
         if self.check_url:
             lines.append(f"[View check run]({self.check_url})")
             lines.append("")
@@ -505,6 +512,13 @@ class GithubHandler(BaseHandler):
             self._app_state = click.get_current_context().obj
         return self._app_state
 
+    def _run_id(self) -> Optional[str]:
+        """The run id this plan is stored under; None when the run has none."""
+        try:
+            return self.app_state.root_options.run_id or None
+        except Exception:
+            return None
+
     def is_ready(self) -> bool:
         return self._ready
 
@@ -527,11 +541,13 @@ class GithubHandler(BaseHandler):
             return
         try:
             self._connect()
+            run_id = self._run_id()
             self._report = GithubStatusReport(
                 deployment=deployment,
                 marker=self.config.comment_marker,
                 max_detail_chars=self.config.max_detail_chars,
                 include_details=self.config.comment_details,
+                run_id=run_id,
             )
             for defn in definitions.values():
                 self._report.ensure(defn.name)
@@ -541,6 +557,7 @@ class GithubHandler(BaseHandler):
 
             head_sha = self._resolve_sha(working_dir)
             check_name = self.config.check_run_name or f"tfworker/{deployment}/plan"
+            check_kwargs = {"external_id": run_id} if run_id else {}
             self._check = self._repo.create_check_run(
                 name=check_name,
                 head_sha=head_sha,
@@ -549,6 +566,7 @@ class GithubHandler(BaseHandler):
                     "title": "Terraform plan in progress",
                     "summary": self._report.render_check_summary(),
                 },
+                **check_kwargs,
             )
             self._report.check_url = self._check_url(self._check)
             for defn in definitions.values():
