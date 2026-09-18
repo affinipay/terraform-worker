@@ -267,6 +267,70 @@ class TestCheckPlan:
         assert not planfile.exists()
 
 
+class TestGetPlan:
+    """get_plan is what an apply-only run uses; it reports whether a plan landed."""
+
+    def test_missing_remote_returns_false(self, handler_with_bucket, tmp_path):
+        handler, _ = handler_with_bucket
+        planfile = tmp_path / "plan.tfplan"
+        definition = MagicMock()
+        definition.name = "def"
+        definition.plan_file = str(planfile)
+        assert handler.get_plan(definition) is False
+        assert not planfile.exists()
+
+    def test_downloads_and_returns_true(
+        self, handler_with_bucket, tmp_path, monkeypatch
+    ):
+        handler, _ = handler_with_bucket
+        planfile = tmp_path / "plan.tfplan"
+        definition = MagicMock()
+        definition.name = "def"
+        definition.plan_file = str(planfile)
+
+        def fake_get(local, remote):
+            Path(local).write_text("data")
+            return True
+
+        monkeypatch.setattr(handler, "_s3_get_plan", fake_get)
+        monkeypatch.setattr(handler, "_verify_lineage", lambda p, s: True)
+        assert handler.get_plan(definition) is True
+        assert planfile.exists()
+
+    def test_bad_lineage_returns_false(
+        self, handler_with_bucket, tmp_path, monkeypatch
+    ):
+        handler, _ = handler_with_bucket
+        planfile = tmp_path / "plan.tfplan"
+        definition = MagicMock()
+        definition.name = "def"
+        definition.plan_file = str(planfile)
+
+        def fake_get(local, remote):
+            Path(local).write_text("data")
+            return True
+
+        monkeypatch.setattr(handler, "_s3_get_plan", fake_get)
+        monkeypatch.setattr(handler, "_verify_lineage", lambda p, s: False)
+        with patch.object(handler, "_s3_delete_plan") as del_mock:
+            assert handler.get_plan(definition) is False
+            del_mock.assert_called_once()
+        assert not planfile.exists()
+
+    def test_vanished_after_download_raises(
+        self, handler_with_bucket, tmp_path, monkeypatch
+    ):
+        handler, _ = handler_with_bucket
+        planfile = tmp_path / "plan.tfplan"
+        definition = MagicMock()
+        definition.name = "def"
+        definition.plan_file = str(planfile)
+
+        monkeypatch.setattr(handler, "_s3_get_plan", lambda local, remote: True)
+        with pytest.raises(HandlerError):
+            handler.get_plan(definition)
+
+
 class TestHasPlan:
     def test_handler_not_ready_returns_false(self, mock_app_state):
         handler = S3Handler()

@@ -174,7 +174,6 @@ class S3Handler(BaseHandler):
     def _check_plan(self, deployment: str, definition: "Definition", **kwargs):
         """check_plan runs while the plan is being checked, it should fetch a file from the backend and store it in the local location"""
         remotefile = self.get_remote_file(definition.name)
-        statefile = f"{self.prefix}/{definition.name}/terraform.tfstate"
         planfile = Path(definition.plan_file)
 
         if self._force_plan():
@@ -198,21 +197,39 @@ class S3Handler(BaseHandler):
             else:
                 raise HandlerError(f"planfile already exists: {planfile}")
 
-        if self._s3_get_plan(planfile.resolve(), remotefile):
-            if not planfile.exists():
-                raise HandlerError(f"planfile not found after download: {planfile}")
-            # verify the lineage and serial from the planfile matches the statefile
-            if not self._verify_lineage(planfile, statefile):
-                log.warn(
-                    f"planfile {remotefile} lineage does not match statefile, remote plan is unsuitable and will be removed"
-                )
-                self._s3_delete_plan(remotefile)
-                planfile.unlink()
-            else:
-                log.info(
-                    f"remote planfile downloaded: s3://{self.bucket}/{remotefile} -> {planfile}"
-                )
+        self.get_plan(definition)
         return None
+
+    def get_plan(self, definition: "Definition") -> bool:
+        """
+        Download the saved plan has_plan reported and leave it at the
+        definition's plan file, refusing one that no longer matches the state.
+
+        Returns:
+            bool: True if a usable plan is in place for this definition
+        """
+        remotefile = self.get_remote_file(definition.name)
+        statefile = f"{self.prefix}/{definition.name}/terraform.tfstate"
+        planfile = Path(definition.plan_file)
+
+        if not self._s3_get_plan(planfile.resolve(), remotefile):
+            return False
+        if not planfile.exists():
+            raise HandlerError(f"planfile not found after download: {planfile}")
+
+        # verify the lineage and serial from the planfile matches the statefile
+        if not self._verify_lineage(planfile, statefile):
+            log.warn(
+                f"planfile {remotefile} lineage does not match statefile, remote plan is unsuitable and will be removed"
+            )
+            self._s3_delete_plan(remotefile)
+            planfile.unlink()
+            return False
+
+        log.info(
+            f"remote planfile downloaded: s3://{self.bucket}/{remotefile} -> {planfile}"
+        )
+        return True
 
     def _post_plan(self, definition: str, result: "TerraformResult", **kwargs):
         """

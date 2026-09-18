@@ -111,6 +111,14 @@ def make_command(tmp_path, **opts_overrides):
     """Create a TerraformCommand with a minimal AppState for testing."""
     TerraformCommandConfig._instance = None
 
+    # root options are their own model in the real app state; keep them off Opts
+    # so a method reading the wrong one fails here as it would in production
+    root_overrides = {
+        key: opts_overrides.pop(key)
+        for key in ("backend_plans", "run_id")
+        if key in opts_overrides
+    }
+
     class Opts:
         def __init__(self):
             self.stream_output = True
@@ -137,6 +145,10 @@ def make_command(tmp_path, **opts_overrides):
         def __init__(self):
             self.log_level = "INFO"
             self.working_dir = str(tmp_path)
+            self.backend_plans = False
+            self.run_id = None
+            for k, v in root_overrides.items():
+                setattr(self, k, v)
 
     state = SimpleNamespace(
         terraform_options=Opts(),
@@ -712,6 +724,209 @@ class TestTerraformCommandMethods:
         run = mocker.patch.object(cmd, "_exec_terraform_action")
         cmd.terraform_apply_or_destroy()
         run.assert_not_called()
+
+    def test_fetch_saved_plans_retrieves_and_marks_apply(self, tmp_path, mocker):
+        """An apply-only run pulls the saved plan the plan phase would have."""
+        cmd = make_command(tmp_path, apply=True, backend_plans=True, run_id="run1")
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            False,
+            "plan available from handler",
+        )
+        cmd.app_state.handlers.get_available_plan.return_value = True
+
+        cmd.terraform_plan()
+
+        cmd.app_state.handlers.get_available_plan.assert_called_once_with(
+            cmd.app_state.definitions["def"]
+        )
+        assert cmd.app_state.definitions["def"].needs_apply is True
+
+    def test_fetch_saved_plans_skips_pre_plan_stage(self, tmp_path, mocker):
+        """Scanning handlers hook pre-plan; a run that does not plan must not fire them."""
+        cmd = make_command(tmp_path, apply=True, backend_plans=True, run_id="run1")
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            False,
+            "plan available from handler",
+        )
+        cmd.app_state.handlers.get_available_plan.return_value = True
+
+        cmd.terraform_plan()
+
+        cmd.app_state.handlers.exec_handlers.assert_not_called()
+
+    def test_fetch_saved_plans_unusable_plan_is_not_applied(self, tmp_path, mocker):
+        """A plan whose lineage no longer matches the state is refused, not applied."""
+        cmd = make_command(tmp_path, apply=True, backend_plans=True, run_id="run1")
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            False,
+            "plan available from handler",
+        )
+        cmd.app_state.handlers.get_available_plan.return_value = False
+
+        cmd.terraform_plan()
+
+        assert cmd.app_state.definitions["def"].needs_apply is False
+
+    def test_fetch_saved_plans_handler_error_is_a_plan_failure(self, tmp_path, mocker):
+        """A fetch failure obeys fail_on_plan_error rather than exiting outright."""
+        cmd = make_command(
+            tmp_path,
+            apply=True,
+            backend_plans=True,
+            run_id="run1",
+            fail_on_plan_error=True,
+        )
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            False,
+            "plan available from handler",
+        )
+        cmd.app_state.handlers.get_available_plan.side_effect = HandlerError("boom")
+
+        with pytest.raises(SystemExit):
+            cmd.terraform_plan()
+
+        assert cmd.app_state.definitions["def"].plan_failed is True
+        assert cmd.app_state.definitions["def"].needs_apply is False
+
+    def test_fetch_saved_plans_handler_error_tolerated(self, tmp_path, mocker):
+        """With the failure options relaxed the run carries on to the apply."""
+        cmd = make_command(
+            tmp_path,
+            apply=True,
+            backend_plans=True,
+            run_id="run1",
+            plan_failures=False,
+            fail_on_plan_error=False,
+        )
+        cmd.app_state.definitions["other"] = Definition(
+            name="other", path="module-other"
+        )
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            False,
+            "plan available from handler",
+        )
+        cmd.app_state.handlers.get_available_plan.side_effect = [
+            HandlerError("boom"),
+            True,
+        ]
+
+        cmd.terraform_plan()
+
+        # the failure is recorded, and the definition behind it still applies
+        assert cmd.app_state.definitions["def"].needs_apply is False
+        assert cmd.app_state.definitions["other"].needs_apply is True
+        cmd.ctx.exit.assert_not_called()
+
+    def test_fetch_saved_plans_halts_on_failure_when_asked(self, tmp_path, mocker):
+        """plan_failures stops the fetch, as it stops the plan phase."""
+        cmd = make_command(
+            tmp_path,
+            apply=True,
+            backend_plans=True,
+            run_id="run1",
+            plan_failures=True,
+            fail_on_plan_error=False,
+        )
+        cmd.app_state.definitions["other"] = Definition(
+            name="other", path="module-other"
+        )
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            False,
+            "plan available from handler",
+        )
+        cmd.app_state.handlers.get_available_plan.side_effect = [
+            HandlerError("boom"),
+            True,
+        ]
+
+        cmd.terraform_plan()
+
+        assert cmd.app_state.handlers.get_available_plan.call_count == 1
+        assert cmd.app_state.definitions["other"].needs_apply is False
+
+    def test_fetch_saved_plans_no_plan_available(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, apply=True, backend_plans=True)
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (True, "no plan file")
+        cmd.app_state.definitions["def"].needs_apply = True
+
+        cmd.terraform_plan()
+
+        cmd.app_state.handlers.get_available_plan.assert_not_called()
+        assert cmd.app_state.definitions["def"].needs_apply is False
+
+    def test_fetch_saved_plans_local_plan_file_needs_no_fetch(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, apply=True, backend_plans=True)
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (False, "plan file exists")
+
+        cmd.terraform_plan()
+
+        cmd.app_state.handlers.get_available_plan.assert_not_called()
+        assert cmd.app_state.definitions["def"].needs_apply is True
+
+    def test_fetch_saved_plans_local_plan_file_path_workflow(self, tmp_path, mocker):
+        """
+        --plan-file-path without --backend-plans: the local plan is the only
+        source, and no handler is consulted for it.
+        """
+        cmd = make_command(
+            tmp_path, apply=True, backend_plans=False, plan_file_path=str(tmp_path)
+        )
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (False, "plan file exists")
+
+        cmd.terraform_plan()
+
+        assert cmd.app_state.definitions["def"].needs_apply is True
+        cmd.app_state.handlers.get_available_plan.assert_not_called()
+
+    def test_fetch_saved_plans_local_plan_file_path_without_a_plan(
+        self, tmp_path, mocker
+    ):
+        """The same options, but nothing was planned; nothing is applied."""
+        cmd = make_command(
+            tmp_path, apply=True, backend_plans=False, plan_file_path=str(tmp_path)
+        )
+        cmd.app_state.definitions["def"].needs_apply = True
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (True, "no plan file")
+
+        cmd.terraform_plan()
+
+        assert cmd.app_state.definitions["def"].needs_apply is False
+        cmd.app_state.handlers.get_available_plan.assert_not_called()
+
+    def test_fetch_saved_plans_requires_saved_plan_storage(self, tmp_path, mocker):
+        """Without --backend-plans or a plan file path there is nothing to fetch."""
+        cmd = make_command(tmp_path, apply=True, backend_plans=False)
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            True,
+            "no saved plans possible",
+        )
+
+        cmd.terraform_plan()
+
+        cmd.app_state.handlers.get_available_plan.assert_not_called()
+
+    def test_fetch_saved_plans_skipped_when_not_applying(self, tmp_path, mocker):
+        cmd = make_command(tmp_path, apply=False, destroy=False, backend_plans=True)
+        plan_cls = mocker.patch("tfworker.definitions.plan.DefinitionPlan")
+        plan_cls.return_value.needs_plan.return_value = (
+            False,
+            "plan available from handler",
+        )
+
+        cmd.terraform_plan()
+
+        cmd.app_state.handlers.get_available_plan.assert_not_called()
 
     def test_terraform_init(self, tmp_path, mocker):
         cmd = make_command(tmp_path)

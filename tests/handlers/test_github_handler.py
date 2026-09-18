@@ -176,6 +176,21 @@ class TestGithubStatusReport:
         assert "| `def1` | ⏳ pending |" in bodies[0]
         assert "| `def2` | 📝 changes | Plan: 1 to add |" in bodies[0]
 
+    def test_run_id_is_reported_when_set(self):
+        """The run id keys the stored plans, so an apply can be requested for them."""
+        report = self.make_report(run_id="run-1234")
+        report.ensure("def1")
+
+        bodies = report.render_comment_bodies()
+
+        assert "Run `run-1234`" in bodies[0]
+        assert "Run `run-1234`" in report.render_check_summary()
+
+    def test_run_id_omitted_when_absent(self):
+        report = self.make_report()
+        report.ensure("def1")
+        assert "Run `" not in report.render_comment_bodies()[0]
+
     def test_mark_preserves_full_detail(self):
         report = self.make_report(max_detail_chars=10)
         report.mark("def1", "changes", detail="x" * 50)
@@ -801,6 +816,39 @@ class TestGithubHandlerTeardown:
         handler._report = None
         handler.teardown("dep", "/tmp")
         handler._check.edit.assert_not_called()
+
+
+class TestSetupRunId:
+    """The rollup check run carries the run id, which is how a tool can ask for
+    an apply of the plans this run stored."""
+
+    def _setup_handler(self, run_id):
+        handler = make_handler()
+        handler._app_state.root_options.run_id = run_id
+        handler._connect = mock.Mock()
+        handler._claim_comments = mock.Mock()
+        handler._resolve_sha = mock.Mock(return_value="abc123")
+        handler._update_comments = mock.Mock()
+        definitions = {"mydef": make_definition()}
+        handler.setup(
+            "dep",
+            mock.Mock(values=lambda: definitions.values()),
+            "/tmp",
+            mock.Mock(plan=True),
+        )
+        return handler
+
+    def test_external_id_is_the_run_id(self):
+        handler = self._setup_handler("run-1234")
+        rollup = handler._repo.create_check_run.call_args_list[0].kwargs
+        assert rollup["external_id"] == "run-1234"
+        assert rollup["name"] == "tfworker/dep/plan"
+        assert "Run `run-1234`" in rollup["output"]["summary"]
+
+    def test_external_id_omitted_without_a_run_id(self):
+        handler = self._setup_handler(None)
+        rollup = handler._repo.create_check_run.call_args_list[0].kwargs
+        assert "external_id" not in rollup
 
 
 class TestClaimComments:
