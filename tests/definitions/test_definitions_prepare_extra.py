@@ -202,6 +202,19 @@ def test_create_terraform_lockfile_writes(def_prepare, mocker):
     assert outfile.read_text() == "LOCK"
 
 
+def test_create_terraform_lockfile_locks_loaded_providers(def_prepare, mocker):
+    def_prepare._app_state.providers = MagicMock()
+    def_prepare._app_state.terraform_options.provider_cache = "cache"
+    mocker.patch.object(Definition, "get_loaded_providers", return_value=["aws"])
+    used = mocker.patch.object(Definition, "get_used_providers")
+    m = mocker.patch(
+        "tfworker.definitions.prepare.generate_terraform_lockfile", return_value=None
+    )
+    def_prepare.create_terraform_lockfile("def1")
+    assert m.call_args.kwargs["included_providers"] == ["aws"]
+    used.assert_not_called()
+
+
 def test_download_modules_success(mocker, def_prepare, definition):
     mocker.patch("tfworker.util.system.pipe_exec", return_value=(0, b"out", b"err"))
     mocker.patch(
