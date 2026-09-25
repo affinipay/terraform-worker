@@ -180,7 +180,7 @@ class DefinitionPrepare:
         log.trace(f"creating terraform lockfile for definition {name}")
         result = generate_terraform_lockfile(
             providers=self._app_state.providers,
-            included_providers=definition.get_used_providers(
+            included_providers=definition.get_loaded_providers(
                 self._app_state.working_dir
             ),
             cache_dir=self._app_state.terraform_options.provider_cache,

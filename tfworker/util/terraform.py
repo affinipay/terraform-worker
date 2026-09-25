@@ -213,6 +213,24 @@ def find_required_providers(
     return required_providers
 
 
+def find_loaded_required_providers(
+    search_dir: str,
+) -> Union[None, Dict[str, List[Dict[str, str]]]]:
+    """
+    Find the required providers of only the modules terraform loads.
+
+    Args:
+        search_dir (str): The root module directory, after `terraform get`.
+
+    Returns:
+        Dict[str, [Dict[str, str]]]: A dictionary of required providers, or None if there are none.
+    """
+    required_providers = tfhelpers._find_loaded_required_providers(search_dir)
+    if len(required_providers) == 0:
+        return None
+    return required_providers
+
+
 @lru_cache
 def quote_index_brackets(resource: str) -> str:
     return re.sub(r'\[([^\[\]"]+)\]', r'["\1"]', resource)

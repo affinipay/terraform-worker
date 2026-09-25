@@ -220,6 +220,24 @@ class Definition(BaseModel):
         """
         return cached_get_used_providers(self.get_target_path(working_dir))
 
+    def get_loaded_providers(self, working_dir: str) -> Union[List[str], None]:
+        """
+        Get the providers terraform will require, once modules are fetched
+
+        Unlike get_used_providers this reads only the modules terraform loads,
+        so it matches what `terraform init` locks.
+
+        Args:
+            working_dir (str): The working directory
+
+        Returns:
+            Union[List[str], None]: The list of providers terraform will require or none
+        """
+        from tfworker.util.terraform import find_loaded_required_providers
+
+        providers = find_loaded_required_providers(self.get_target_path(working_dir))
+        return list(providers.keys()) if providers else None
+
     def existing_planfile(self, working_dir: str) -> bool:
         """
         Check if the planfile exists
