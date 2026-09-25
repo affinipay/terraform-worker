@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Dict, List, Tuple, Union
 
 import click
+from packaging.specifiers import SpecifierSet
 
 import tfworker.util.log as log
 import tfworker.util.terraform_helpers as tfhelpers
@@ -215,7 +216,7 @@ def find_required_providers(
 
 def find_loaded_required_providers(
     search_dir: str,
-) -> Union[None, Dict[str, List[Dict[str, str]]]]:
+) -> Union[None, Dict[str, Dict[str, Union[str, SpecifierSet]]]]:
     """
     Find the required providers of only the modules terraform loads.
 
@@ -223,7 +224,8 @@ def find_loaded_required_providers(
         search_dir (str): The root module directory, after `terraform get`.
 
     Returns:
-        Dict[str, [Dict[str, str]]]: A dictionary of required providers, or None if there are none.
+        Dict[str, Dict[str, Union[str, SpecifierSet]]]: Each provider's "source"
+        and "version", or None if there are none.
     """
     required_providers = tfhelpers._find_loaded_required_providers(search_dir)
     if len(required_providers) == 0:

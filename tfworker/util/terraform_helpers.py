@@ -167,7 +167,7 @@ def _find_required_providers(
 
 def _find_loaded_required_providers(
     search_dir: str,
-) -> Dict[str, Dict[str, "ProviderRequirements"]]:
+) -> Dict[str, Dict[str, Union[str, SpecifierSet]]]:
     """
     Find the providers terraform will require for the configuration in search_dir.
 
@@ -184,17 +184,23 @@ def _find_loaded_required_providers(
         search_dir (str): The root module directory, after `terraform get`.
 
     Returns:
-        Dict[str, Dict[str, ProviderRequirements]]: A dictionary of required providers.
+        Dict[str, Dict[str, Union[str, SpecifierSet]]]: Each provider's "source"
+        and "version"; a provider known only from a provider block has an empty
+        source and no version constraint.
+
+    Raises:
+        TFWorkerException: If modules.json cannot be read or is not the expected shape.
     """
     manifest = os.path.join(search_dir, ".terraform", "modules", "modules.json")
     if not os.path.isfile(manifest):
         return _find_required_providers(search_dir)
 
-    with open(manifest, "r") as f:
-        modules = json.load(f).get("Modules") or []
-    module_dirs = {"."} | {m["Dir"] for m in modules if m.get("Dir")}
+    module_dirs = {"."} | set(_read_module_dirs(manifest))
 
     providers = {}
+    # added after every required_providers entry is merged, so an empty source
+    # from a provider block is never compared against a declared one
+    configured = set()
     for module_dir in sorted(module_dirs):
         path = os.path.normpath(os.path.join(search_dir, module_dir))
         if not os.path.isdir(path):
@@ -207,11 +213,29 @@ def _find_loaded_required_providers(
             if content is None:
                 continue
             _update_parsed_providers(providers, _parse_required_providers(content))
-            _update_parsed_providers(providers, _parse_provider_blocks(content))
+            configured.update(_parse_provider_blocks(content))
+    for name in sorted(configured - providers.keys()):
+        providers[name] = {"source": "", "version": _get_specifier_set("")}
     log.trace(
         f"Found loaded required providers: {[x for x in providers.keys()]} in {search_dir}"
     )
     return providers
+
+
+def _read_module_dirs(manifest: str) -> List[str]:
+    """The module directories recorded in a modules.json manifest."""
+    try:
+        with open(manifest, "r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise TFWorkerException(f"unable to read module manifest {manifest}: {e}")
+
+    modules = data.get("Modules") if isinstance(data, dict) else None
+    if not isinstance(modules, list) or not all(isinstance(m, dict) for m in modules):
+        raise TFWorkerException(
+            f"module manifest {manifest} has no list of modules under 'Modules'"
+        )
+    return [m["Dir"] for m in modules if isinstance(m.get("Dir"), str) and m["Dir"]]
 
 
 def _load_tf_file(path: str) -> Union[dict, None]:
@@ -229,9 +253,9 @@ def _load_tf_file(path: str) -> Union[dict, None]:
             return None
 
 
-def _parse_provider_blocks(content: dict) -> Dict[str, dict]:
+def _parse_provider_blocks(content: dict) -> List[str]:
     """The names of the providers configured by provider blocks in the content."""
-    return {name: {} for block in content.get("provider", []) for name in block}
+    return [name for block in content.get("provider", []) for name in block]
 
 
 def _parse_required_providers(content: dict) -> Dict[str, "ProviderRequirements"]:

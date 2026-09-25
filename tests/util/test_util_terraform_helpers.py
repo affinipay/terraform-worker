@@ -484,6 +484,47 @@ class TestTerraformHelpersFindLoadedRequiredProviders:
         providers = _find_loaded_required_providers(str(tmp_path))
         assert sorted(providers) == ["aws"]
 
+    def test_provider_block_read_before_required_providers(self, tmp_path):
+        # providers.tf sorts before versions.tf, so the block is read first
+        (tmp_path / "providers.tf").write_text('provider "aws" {\n  region = "x"\n}\n')
+        (tmp_path / "versions.tf").write_text(_required("aws", "hashicorp/aws"))
+        self._write_manifest(tmp_path, [])
+
+        providers = _find_loaded_required_providers(str(tmp_path))
+        assert providers["aws"]["source"] == "hashicorp/aws"
+
+    def test_generated_provider_block_and_module_requirement(self, tmp_path):
+        (tmp_path / "worker_generated_terraform.tf").write_text('provider "tls" {}\n')
+        (tmp_path / "local").mkdir()
+        (tmp_path / "local" / "versions.tf").write_text(
+            _required("tls", "hashicorp/tls")
+        )
+        self._write_manifest(
+            tmp_path, [{"Key": "local", "Source": "./local", "Dir": "local"}]
+        )
+
+        providers = _find_loaded_required_providers(str(tmp_path))
+        assert providers["tls"]["source"] == "hashicorp/tls"
+
+    def test_provider_block_only_has_no_source(self, tmp_path):
+        (tmp_path / "providers.tf").write_text('provider "tls" {}\n')
+        self._write_manifest(tmp_path, [])
+
+        providers = _find_loaded_required_providers(str(tmp_path))
+        assert providers == {"tls": {"source": "", "version": SpecifierSet("")}}
+
+    @pytest.mark.parametrize(
+        "manifest",
+        ["{not json", "[]", '{"Modules": {}}', '{"Modules": ["x"]}'],
+    )
+    def test_malformed_manifest_raises(self, tmp_path, manifest):
+        path = tmp_path / ".terraform" / "modules" / "modules.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(manifest)
+
+        with pytest.raises(TFWorkerException):
+            _find_loaded_required_providers(str(tmp_path))
+
     def test_missing_module_dir_is_skipped(self, tmp_path):
         (tmp_path / "main.tf").write_text(_required("aws", "hashicorp/aws"))
         self._write_manifest(
