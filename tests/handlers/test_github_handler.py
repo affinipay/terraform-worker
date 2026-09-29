@@ -11,7 +11,9 @@ from tfworker.handlers.github import (
     GithubHandler,
     GithubStatusReport,
     _chunk_markdown,
+    _diff_format,
     _fence_safe_truncate,
+    _hard_wrap,
 )
 
 GITHUB_ENV_VARS = [
@@ -45,28 +47,21 @@ def make_config(**overrides) -> GithubConfig:
 
 
 def make_handler(config=None, with_pr=True) -> GithubHandler:
-    handler = GithubHandler.__new__(GithubHandler)
-    handler.config = config or make_config()
-    handler._ready = True
+    """A handler as setup() leaves it, with the GitHub objects mocked."""
+    handler = GithubHandler(config or make_config())
     handler._app_state = mock.Mock()
     handler._app_state.handlers.get_results.return_value = []
-    handler._gh = mock.Mock()
     handler._repo = mock.Mock()
-    handler._pr = mock.Mock() if with_pr else None
     if with_pr:
+        handler._pr = mock.Mock()
         handler._issue = mock.Mock()
         handler._issue.create_comment.return_value.html_url = (
             "https://github.test/comment/1"
         )
-    else:
-        handler._issue = None
-    handler._check = mock.Mock()
-    handler._check.html_url = "https://github.test/check/1"
-    handler._def_checks = {"mydef": mock.Mock()}
-    handler._def_checks["mydef"].html_url = "https://github.test/check/mydef"
-    handler._def_concluded = set()
-    handler._comments = []
-    handler._api_failures = 0
+    handler._check = mock.Mock(html_url="https://github.test/check/1")
+    handler._def_checks = {
+        "mydef": mock.Mock(html_url="https://github.test/check/mydef")
+    }
     handler._report = GithubStatusReport(
         deployment="dep", marker="tfworker-status", max_detail_chars=8000
     )
@@ -104,7 +99,7 @@ class TestGithubConfig:
         assert config.private_key == "envpem"
         assert config.pull_request == 42
         assert config.installation_id == 777
-        assert config.missing_settings() == []
+        assert config.settings_errors() == []
 
     def test_pull_request_env_fallback_alternate_name(self, monkeypatch):
         monkeypatch.setenv("PULL_REQUEST", "13")
@@ -126,17 +121,27 @@ class TestGithubConfig:
         config = GithubConfig()
         assert config.pull_request is None
 
-    def test_missing_settings(self):
+    def test_non_numeric_installation_id_env_ignored(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "abc")
         config = GithubConfig()
-        missing = config.missing_settings()
-        assert "repository" in missing
-        assert "app_id" in missing
-        assert "private_key or private_key_file" in missing
+        assert config.installation_id is None
+
+    def test_empty_render_coercion_leaves_required_strings_alone(self):
+        config = make_config(comment_marker="none")
+        assert config.comment_marker == "none"
+
+    def test_missing_settings(self):
+        errors = GithubConfig().settings_errors()
+        assert errors == [
+            "missing repository",
+            "missing app_id",
+            "missing private_key or private_key_file",
+        ]
 
     def test_both_private_key_sources_rejected(self):
         config = make_config(private_key_file="/tmp/key.pem")
-        assert config.missing_settings() == [
-            "only one of private_key / private_key_file"
+        assert config.settings_errors() == [
+            "private_key and private_key_file are mutually exclusive"
         ]
 
 
@@ -194,7 +199,7 @@ class TestGithubStatusReport:
     def test_mark_preserves_full_detail(self):
         report = self.make_report(max_detail_chars=10)
         report.mark("def1", "changes", detail="x" * 50)
-        assert report._rows["def1"]["detail"] == "x" * 50
+        assert report.rows["def1"].detail == "x" * 50
 
     def test_check_summary_detail_truncated_fence_safe(self):
         report = self.make_report(max_detail_chars=30)
@@ -271,9 +276,9 @@ class TestGithubStatusReport:
 
         report.finalize()
 
-        assert report._rows["never_ran"]["status"] == "skipped"
-        assert report._rows["in_flight"]["status"] == "skipped"
-        assert report._rows["done"]["status"] == "no_changes"
+        assert report.rows["never_ran"].status == "skipped"
+        assert report.rows["in_flight"].status == "skipped"
+        assert report.rows["done"].status == "no_changes"
 
     def test_conclusion(self):
         report = self.make_report()
@@ -294,14 +299,10 @@ class TestGithubStatusReport:
 
 class TestHardWrap:
     def test_short_lines_untouched(self):
-        from tfworker.handlers.github import _hard_wrap
-
         text = 'resource "aws_s3_bucket" "b" {\n  bucket = "short"\n}'
         assert _hard_wrap(text, 120) == text
 
     def test_long_line_wrapped_with_indent(self):
-        from tfworker.handlers.github import _hard_wrap
-
         line = "      query = " + "sum:metric{tag} " * 20
         out = _hard_wrap(line, 80)
         lines = out.splitlines()
@@ -311,36 +312,16 @@ class TestHardWrap:
         assert lines[1].startswith("          ")
 
     def test_zero_width_disables_wrapping(self):
-        from tfworker.handlers.github import _hard_wrap
-
         line = "x" * 300
         assert _hard_wrap(line, 0) == line
 
     def test_unbreakable_token_left_intact(self):
-        from tfworker.handlers.github import _hard_wrap
-
         arn = "arn:aws:iam::123456789012:role/" + "a" * 150
         assert arn in _hard_wrap(f"role = {arn}", 80)
-
-    def test_trimmed_plan_wraps_long_lines(self):
-        text = (
-            "Terraform will perform the following actions:\n"
-            + "  attribute = "
-            + "value " * 40
-            + "\n"
-            + "Plan: 1 to add, 0 to change, 0 to destroy.\n"
-        )
-        out = GithubHandler._trimmed_plan(text, wrap_width=60)
-        assert all(
-            len(line) <= 60 for line in out.splitlines() if not line.startswith("```")
-        )
-        assert out.count("value") == 40
 
 
 class TestDiffFormat:
     def test_markers_hoisted_to_column_zero(self):
-        from tfworker.handlers.github import _diff_format
-
         text = (
             '  + resource "a" "b" {\n'
             '  - resource "c" "d" {\n'
@@ -359,9 +340,23 @@ class TestDiffFormat:
         assert out[5].startswith("+      ")
 
     def test_replace_marker_with_indent_becomes_bang(self):
-        from tfworker.handlers.github import _diff_format
-
         assert _diff_format('  -/+ resource "g" "h" {').startswith("!  ")
+
+
+class TestPlanParsing:
+    def test_trimmed_plan_wraps_long_lines(self):
+        text = (
+            "Terraform will perform the following actions:\n"
+            + "  attribute = "
+            + "value " * 40
+            + "\n"
+            + "Plan: 1 to add, 0 to change, 0 to destroy.\n"
+        )
+        out = GithubHandler._trimmed_plan(text, wrap_width=60)
+        assert all(
+            len(line) <= 60 for line in out.splitlines() if not line.startswith("```")
+        )
+        assert out.count("value") == 40
 
     def test_output_only_plan_is_captured(self):
         """A plan that only moves outputs has neither the resource-actions
@@ -495,7 +490,7 @@ class TestGithubHandlerExecute:
             definition=make_definition(),
             working_dir="/tmp",
         )
-        assert handler._report._rows["mydef"]["status"] == "running"
+        assert handler._report.rows["mydef"].status == "running"
         handler._issue.create_comment.assert_called_once()
 
     def test_post_plan_exit_code_1_marks_failed(self):
@@ -508,9 +503,9 @@ class TestGithubHandlerExecute:
             working_dir="/tmp",
             result=TerraformResult(1, b"", b"Error: something broke\n"),
         )
-        row = handler._report._rows["mydef"]
-        assert row["status"] == "failed"
-        assert "something broke" in row["detail"]
+        row = handler._report.rows["mydef"]
+        assert row.status == "failed"
+        assert "something broke" in row.detail
 
     def test_post_plan_exit_code_0_marks_no_changes(self):
         handler = make_handler()
@@ -522,7 +517,7 @@ class TestGithubHandlerExecute:
             working_dir="/tmp",
             result=TerraformResult(0, b"No changes.", b""),
         )
-        assert handler._report._rows["mydef"]["status"] == "no_changes"
+        assert handler._report.rows["mydef"].status == "no_changes"
 
     def test_post_plan_exit_code_2_marks_changes_and_returns_result(self):
         handler = make_handler()
@@ -534,10 +529,10 @@ class TestGithubHandlerExecute:
             working_dir="/tmp",
             result=TerraformResult(2, PLAN_STDOUT, b""),
         )
-        row = handler._report._rows["mydef"]
-        assert row["status"] == "changes"
-        assert row["plan_line"] == "Plan: 1 to add, 0 to change, 0 to destroy."
-        assert "null_resource.example" in row["detail"]
+        row = handler._report.rows["mydef"]
+        assert row.status == "changes"
+        assert row.plan_line == "Plan: 1 to add, 0 to change, 0 to destroy."
+        assert "null_resource.example" in row.detail
         assert ret is not None
         assert ret.handler == "github"
         assert ret.definition == "mydef"
@@ -565,7 +560,7 @@ class TestGithubHandlerExecute:
             working_dir="/tmp",
             result=TerraformResult(2, PLAN_STDOUT, b""),
         )
-        detail = handler._report._rows["mydef"]["detail"]
+        detail = handler._report.rows["mydef"].detail
         assert "AI SUMMARY OF PLAN" in detail
         assert "WRONG DEFINITION" not in detail
 
@@ -579,9 +574,9 @@ class TestGithubHandlerExecute:
             working_dir="/tmp",
             result=TerraformResult(1, b"", b"Error: bad provider\n"),
         )
-        row = handler._report._rows["mydef"]
-        assert row["status"] == "failed"
-        assert "bad provider" in row["detail"]
+        row = handler._report.rows["mydef"]
+        assert row.status == "failed"
+        assert "bad provider" in row.detail
 
     def test_no_pr_skips_comments_but_updates_check(self):
         handler = make_handler(with_pr=False)
@@ -608,6 +603,37 @@ class TestGithubHandlerExecute:
                 working_dir="/tmp",
             )
         assert handler.is_ready() is False
+
+    def test_success_resets_the_failure_count(self):
+        handler = make_handler()
+        handler._def_checks["mydef"].edit.side_effect = [
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            None,
+            RuntimeError("boom"),
+        ]
+        for _ in range(4):
+            handler.execute(
+                action=TerraformAction.PLAN,
+                stage=TerraformStage.PRE,
+                deployment="dep",
+                definition=make_definition(),
+                working_dir="/tmp",
+            )
+        assert handler._api_failures == 1
+        assert handler.is_ready() is True
+
+    def test_post_without_result_is_ignored(self):
+        handler = make_handler()
+        ret = handler.execute(
+            action=TerraformAction.PLAN,
+            stage=TerraformStage.POST,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+        )
+        assert ret is None
+        handler._def_checks["mydef"].edit.assert_not_called()
 
     def test_not_ready_handler_does_nothing(self):
         handler = make_handler()
@@ -786,7 +812,7 @@ class TestGithubHandlerTeardown:
 
         kwargs = handler._check.edit.call_args.kwargs
         assert kwargs["conclusion"] == "success"
-        assert handler._report._rows["never_ran"]["status"] == "skipped"
+        assert handler._report.rows["never_ran"].status == "skipped"
 
     def test_teardown_without_setup_is_noop(self):
         handler = make_handler()
@@ -848,7 +874,7 @@ class TestSetupRunId:
         )
 
         assert handler._report.check_url == "https://github.com/o/r/runs/1"
-        assert handler._report._rows["mydef"]["url"] == "https://github.com/o/r/runs/2"
+        assert handler._report.rows["mydef"].url == "https://github.com/o/r/runs/2"
 
 
 class TestClaimComments:
@@ -907,3 +933,113 @@ class TestClaimComments:
         handler._report = None
         handler._claim_comments()
         assert handler._comments == []
+
+
+class TestResolveSha:
+    def test_commit_sha_config_wins(self, monkeypatch):
+        handler = make_handler(config=make_config(commit_sha="configsha"))
+        monkeypatch.setenv("GITHUB_SHA", "envsha")
+        assert handler._resolve_sha() == "configsha"
+
+    def test_pr_head_preferred_over_github_sha(self, monkeypatch):
+        handler = make_handler()
+        handler._pr.head.sha = "headsha"
+        monkeypatch.setenv("GITHUB_SHA", "envsha")
+        assert handler._resolve_sha() == "headsha"
+
+    def test_github_sha_without_a_pr(self, monkeypatch):
+        handler = make_handler(with_pr=False)
+        monkeypatch.setenv("GITHUB_SHA", "envsha")
+        assert handler._resolve_sha() == "envsha"
+
+    def test_no_commit_raises(self):
+        handler = make_handler(with_pr=False)
+        with pytest.raises(HandlerError):
+            handler._resolve_sha()
+
+
+class TestConnect:
+    @pytest.fixture
+    def integration(self):
+        with (
+            mock.patch("github.GithubIntegration") as integration_cls,
+            mock.patch("github.Auth.AppAuth") as app_auth,
+        ):
+            integration = integration_cls.return_value
+            integration.get_repo_installation.return_value.id = 55
+            yield SimpleNamespace(integration=integration, app_auth=app_auth)
+
+    def test_discovers_installation_and_loads_pull_request(self, integration):
+        handler = GithubHandler(make_config())
+
+        handler._connect()
+
+        integration.app_auth.assert_called_once_with("12345", "---PEM---")
+        integration.integration.get_repo_installation.assert_called_once_with(
+            "myorg", "myrepo"
+        )
+        gh = integration.integration.get_github_for_installation
+        gh.assert_called_once_with(55)
+        repo = gh.return_value.get_repo.return_value
+        assert handler._repo is repo
+        repo.get_pull.assert_called_once_with(7)
+        repo.get_issue.assert_called_once_with(7)
+
+    def test_configured_installation_and_key_file(self, integration, tmp_path):
+        key = tmp_path / "app.pem"
+        key.write_text("FILE PEM")
+        handler = GithubHandler(
+            make_config(
+                private_key=None,
+                private_key_file=str(key),
+                installation_id=99,
+                pull_request=None,
+            )
+        )
+
+        handler._connect()
+
+        integration.app_auth.assert_called_once_with("12345", "FILE PEM")
+        integration.integration.get_repo_installation.assert_not_called()
+        integration.integration.get_github_for_installation.assert_called_once_with(99)
+        assert handler._pr is None
+        assert handler._issue is None
+
+
+class TestSetupFailure:
+    def _setup(self, handler):
+        handler._connect = mock.Mock(side_effect=RuntimeError("bad credentials"))
+        handler.setup("dep", mock.Mock(values=lambda: []), "/tmp", mock.Mock(plan=True))
+
+    def test_failure_disables_the_handler(self):
+        handler = make_handler()
+        self._setup(handler)
+        assert handler.is_ready() is False
+
+    def test_failure_raises_when_required(self):
+        handler = make_handler(config=make_config(required=True))
+        with pytest.raises(HandlerError, match="bad credentials"):
+            self._setup(handler)
+
+    def test_plan_not_requested_disables(self):
+        handler = make_handler()
+        handler._connect = mock.Mock()
+        handler.setup("dep", mock.Mock(), "/tmp", mock.Mock(plan=False))
+        assert handler.is_ready() is False
+        handler._connect.assert_not_called()
+
+
+class TestHandlerHelpers:
+    def test_run_id_without_a_click_context(self):
+        handler = GithubHandler(make_config())
+        assert handler._run_id() is None
+
+    def test_summary_lookup_errors_fall_back_to_the_plan(self):
+        handler = make_handler()
+        handler._app_state.handlers.get_results.side_effect = RuntimeError("boom")
+        assert handler._summary_for(make_definition()) is None
+
+    def test_summary_lookup_without_a_plan_file(self):
+        handler = make_handler()
+        assert handler._summary_for(make_definition(plan_file=None)) is None
+        handler._app_state.handlers.get_results.assert_not_called()
