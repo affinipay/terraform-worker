@@ -568,7 +568,7 @@ class GithubHandler(BaseHandler):
                 },
                 **check_kwargs,
             )
-            self._report.check_url = self._check_url(self._check)
+            self._report.check_url = self._check.html_url
             for defn in definitions.values():
                 check = self._repo.create_check_run(
                     name=f"{check_name}: {defn.name}",
@@ -576,7 +576,7 @@ class GithubHandler(BaseHandler):
                     status="queued",
                 )
                 self._def_checks[defn.name] = check
-                self._report.set_url(defn.name, self._check_url(check))
+                self._report.set_url(defn.name, check.html_url)
             self._update_comments()
         except Exception as e:
             log.error(f"github handler setup failed: {e}")
@@ -685,8 +685,8 @@ class GithubHandler(BaseHandler):
             action=TerraformAction.PLAN,
             stage=TerraformStage.POST,
             definition=definition.name,
-            check_run_url=self._check_url(self._check) if self._check else None,
-            definition_check_url=self._check_url(def_check) if def_check else None,
+            check_run_url=self._check.html_url if self._check else None,
+            definition_check_url=def_check.html_url if def_check else None,
             comment_url=self._comments[0].html_url if self._comments else None,
         )
 
@@ -752,18 +752,6 @@ class GithubHandler(BaseHandler):
     ###########################################################################
     # github api plumbing
     ###########################################################################
-    def _check_url(self, check) -> str:
-        """Prefer the PR-scoped check view (.../pull/N/checks?check_run_id=X)
-        over the generic runs page when a pull request is configured."""
-        url = check.html_url
-        if self.config.pull_request and url and "/runs/" in url:
-            base = url.split("/runs/", 1)[0]
-            return (
-                f"{base}/pull/{self.config.pull_request}"
-                f"/checks?check_run_id={check.id}"
-            )
-        return url
-
     def _connect(self) -> None:
         from github import Auth, GithubIntegration
 

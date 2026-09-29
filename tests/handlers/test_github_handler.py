@@ -446,29 +446,6 @@ class TestDiffFormat:
         assert '\n+   resource "null_resource" "example" {\n' in out
 
 
-class TestCheckUrl:
-    def test_pr_scoped_url(self):
-        handler = make_handler()
-        check = mock.Mock()
-        check.html_url = "https://github.com/myorg/myrepo/runs/93896934944"
-        check.id = 93896934944
-        assert handler._check_url(check) == (
-            "https://github.com/myorg/myrepo/pull/7/checks?check_run_id=93896934944"
-        )
-
-    def test_no_pull_request_keeps_html_url(self):
-        handler = make_handler(config=make_config(pull_request=None), with_pr=False)
-        check = mock.Mock()
-        check.html_url = "https://github.com/myorg/myrepo/runs/1"
-        assert handler._check_url(check) == "https://github.com/myorg/myrepo/runs/1"
-
-    def test_unrecognized_url_left_alone(self):
-        handler = make_handler()
-        check = mock.Mock()
-        check.html_url = "https://github.test/check/1"
-        assert handler._check_url(check) == "https://github.test/check/1"
-
-
 class TestMarkdownHelpers:
     def test_chunk_markdown_under_limit_is_single_chunk(self):
         assert _chunk_markdown("short", 100) == ["short"]
@@ -849,6 +826,29 @@ class TestSetupRunId:
         handler = self._setup_handler(None)
         rollup = handler._repo.create_check_run.call_args_list[0].kwargs
         assert "external_id" not in rollup
+
+    def test_links_use_the_check_run_html_url(self):
+        handler = make_handler()
+        handler._app_state.root_options.run_id = None
+        handler._connect = mock.Mock()
+        handler._claim_comments = mock.Mock()
+        handler._resolve_sha = mock.Mock(return_value="abc123")
+        handler._update_comments = mock.Mock()
+        handler._repo.create_check_run.side_effect = [
+            mock.Mock(html_url="https://github.com/o/r/runs/1"),
+            mock.Mock(html_url="https://github.com/o/r/runs/2"),
+        ]
+        definitions = {"mydef": make_definition()}
+
+        handler.setup(
+            "dep",
+            mock.Mock(values=lambda: definitions.values()),
+            "/tmp",
+            mock.Mock(plan=True),
+        )
+
+        assert handler._report.check_url == "https://github.com/o/r/runs/1"
+        assert handler._report._rows["mydef"]["url"] == "https://github.com/o/r/runs/2"
 
 
 class TestClaimComments:
