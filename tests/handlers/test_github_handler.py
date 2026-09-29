@@ -62,6 +62,8 @@ def make_handler(config=None, with_pr=True) -> GithubHandler:
     handler._def_checks = {
         "mydef": mock.Mock(html_url="https://github.test/check/mydef")
     }
+    handler._deployment = "dep"
+    handler._head_sha = "abc123"
     handler._report = GithubStatusReport(
         deployment="dep", marker="tfworker-status", max_detail_chars=8000
     )
@@ -468,10 +470,10 @@ class TestMarkdownHelpers:
 
 
 class TestGithubHandlerExecute:
-    def test_non_plan_action_is_ignored(self):
+    def test_unhandled_action_is_ignored(self):
         handler = make_handler()
         ret = handler.execute(
-            action=TerraformAction.APPLY,
+            action=TerraformAction.DESTROY,
             stage=TerraformStage.POST,
             deployment="dep",
             definition=make_definition(),
@@ -593,7 +595,7 @@ class TestGithubHandlerExecute:
 
     def test_api_errors_are_swallowed_and_disable_after_threshold(self):
         handler = make_handler()
-        handler._issue.create_comment.side_effect = RuntimeError("boom")
+        handler._def_checks["mydef"].edit.side_effect = RuntimeError("boom")
         for _ in range(3):
             handler.execute(
                 action=TerraformAction.PLAN,
@@ -603,6 +605,45 @@ class TestGithubHandlerExecute:
                 working_dir="/tmp",
             )
         assert handler.is_ready() is False
+
+    def test_comment_failures_disable_only_the_comment(self):
+        handler = make_handler()
+        handler._issue.create_comment.side_effect = RuntimeError("boom")
+        for _ in range(3):
+            handler.execute(
+                action=TerraformAction.PLAN,
+                stage=TerraformStage.PRE,
+                deployment="dep",
+                definition=make_definition(),
+                working_dir="/tmp",
+            )
+        assert handler._comments_enabled is False
+        assert handler.is_ready() is True
+        # check runs keep reporting after the comment gives up
+        handler._def_checks["mydef"].edit.reset_mock()
+        handler._issue.create_comment.reset_mock()
+        handler.execute(
+            action=TerraformAction.PLAN,
+            stage=TerraformStage.POST,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=TerraformResult(0, b"No changes.", b""),
+        )
+        handler._def_checks["mydef"].edit.assert_called_once()
+        handler._issue.create_comment.assert_not_called()
+
+    def test_comment_failure_count_resets_on_success(self):
+        handler = make_handler()
+        handler._issue.create_comment.side_effect = [
+            RuntimeError("boom"),
+            RuntimeError("boom"),
+            mock.Mock(),
+        ]
+        for _ in range(3):
+            handler._update_comments()
+        assert handler._comment_failures == 0
+        assert handler._comments_enabled is True
 
     def test_success_resets_the_failure_count(self):
         handler = make_handler()
@@ -853,6 +894,13 @@ class TestSetupRunId:
         rollup = handler._repo.create_check_run.call_args_list[0].kwargs
         assert "external_id" not in rollup
 
+    def test_definition_checks_carry_the_run_id(self):
+        """So an apply can match them to its run when rebuilding the comment."""
+        handler = self._setup_handler("run-1234")
+        per_def = handler._repo.create_check_run.call_args_list[1].kwargs
+        assert per_def["name"] == "tfworker/dep/plan: mydef"
+        assert per_def["external_id"] == "run-1234"
+
     def test_links_use_the_check_run_html_url(self):
         handler = make_handler()
         handler._app_state.root_options.run_id = None
@@ -1021,10 +1069,12 @@ class TestSetupFailure:
         with pytest.raises(HandlerError, match="bad credentials"):
             self._setup(handler)
 
-    def test_plan_not_requested_disables(self):
+    def test_neither_plan_nor_apply_disables(self):
         handler = make_handler()
         handler._connect = mock.Mock()
-        handler.setup("dep", mock.Mock(), "/tmp", mock.Mock(plan=False))
+        handler.setup(
+            "dep", mock.Mock(), "/tmp", SimpleNamespace(plan=False, apply=False)
+        )
         assert handler.is_ready() is False
         handler._connect.assert_not_called()
 
@@ -1043,3 +1093,507 @@ class TestHandlerHelpers:
         handler = make_handler()
         assert handler._summary_for(make_definition(plan_file=None)) is None
         handler._app_state.handlers.get_results.assert_not_called()
+
+
+class TestSetupModes:
+    def _setup(self, handler, **options):
+        handler._app_state.root_options.run_id = "run-1234"
+        handler._connect = mock.Mock()
+        handler._resolve_sha = mock.Mock(return_value="abc123")
+        handler._load_run_state = mock.Mock()
+        definitions = {"mydef": make_definition()}
+        handler.setup(
+            "dep",
+            mock.Mock(values=lambda: definitions.values()),
+            "/tmp",
+            SimpleNamespace(**options),
+        )
+
+    def test_apply_only_rebuilds_state_and_creates_no_plan_checks(self):
+        handler = make_handler()
+        self._setup(handler, plan=False, apply=True)
+        assert handler.is_ready() is True
+        assert handler._planning is False
+        handler._resolve_sha.assert_called_once_with(for_apply=True)
+        handler._load_run_state.assert_called_once_with("run-1234")
+        handler._repo.create_check_run.assert_not_called()
+
+    def test_claim_failure_disables_comments_not_the_handler(self):
+        handler = make_handler()
+        handler._issue.get_comments.side_effect = RuntimeError("boom")
+        self._setup(handler, plan=True, apply=False)
+        assert handler.is_ready() is True
+        assert handler._comments_enabled is False
+        handler._issue.create_comment.assert_not_called()
+        handler._repo.create_check_run.assert_called()
+
+
+class TestResolveShaForApply:
+    def test_apply_prefers_the_requested_commit_over_pr_head(self, monkeypatch):
+        handler = make_handler()
+        handler._pr.head.sha = "headsha"
+        monkeypatch.setenv("GITHUB_SHA", "plannedsha")
+        assert handler._resolve_sha(for_apply=True) == "plannedsha"
+
+    def test_apply_falls_back_to_pr_head(self):
+        handler = make_handler()
+        handler._pr.head.sha = "headsha"
+        assert handler._resolve_sha(for_apply=True) == "headsha"
+
+    def test_apply_without_a_commit_raises(self):
+        handler = make_handler(with_pr=False)
+        with pytest.raises(HandlerError):
+            handler._resolve_sha(for_apply=True)
+
+    def test_commit_sha_config_wins(self, monkeypatch):
+        handler = make_handler(config=make_config(commit_sha="configsha"))
+        monkeypatch.setenv("GITHUB_SHA", "plannedsha")
+        assert handler._resolve_sha(for_apply=True) == "configsha"
+
+
+APPLY_STDOUT = (
+    b"null_resource.example: Creating...\n"
+    b"null_resource.example: Creation complete after 0s [id=123]\n"
+    b"\n"
+    b"\n"
+    b"Apply complete! Resources: 1 added, 0 changed, 0 destroyed.\n"
+)
+
+
+class TestApply:
+    def apply_handler(self, planning=True):
+        handler = make_handler()
+        handler._planning = planning
+        handler._app_state.root_options.run_id = "run-1234"
+        rollup = mock.Mock(html_url="https://github.test/apply")
+        per_def = mock.Mock(html_url="https://github.test/apply/mydef")
+        handler._repo.create_check_run.side_effect = [rollup, per_def]
+        return handler, rollup, per_def
+
+    def run(self, handler, stage, result=None):
+        return handler.execute(
+            action=TerraformAction.APPLY,
+            stage=stage,
+            deployment="dep",
+            definition=make_definition(),
+            working_dir="/tmp",
+            result=result,
+        )
+
+    def test_pre_apply_creates_rollup_and_definition_checks(self):
+        handler, rollup, per_def = self.apply_handler()
+        handler._report.mark("mydef", "changes", plan_line="Plan: 1 to add")
+
+        self.run(handler, TerraformStage.PRE)
+
+        calls = handler._repo.create_check_run.call_args_list
+        assert calls[0].kwargs["name"] == "tfworker/dep/apply"
+        assert calls[0].kwargs["external_id"] == "run-1234"
+        assert calls[1].kwargs["name"] == "tfworker/dep/apply: mydef"
+        assert calls[1].kwargs["head_sha"] == "abc123"
+        assert calls[1].kwargs["status"] == "in_progress"
+        row = handler._report.rows["mydef"]
+        assert row.apply_status == "running"
+        assert row.apply_url == "https://github.test/apply/mydef"
+        body = handler._issue.create_comment.call_args.args[0]
+        assert "| Apply |" in body
+        assert "[🚀 applying](https://github.test/apply/mydef)" in body
+        assert "[View apply check run](https://github.test/apply)" in body
+
+    def test_rollup_created_once(self):
+        handler, rollup, per_def = self.apply_handler()
+        other = mock.Mock(html_url="https://github.test/apply/other")
+        handler._repo.create_check_run.side_effect = [rollup, per_def, other]
+        self.run(handler, TerraformStage.PRE)
+        handler.execute(
+            action=TerraformAction.APPLY,
+            stage=TerraformStage.PRE,
+            deployment="dep",
+            definition=make_definition(name="other"),
+            working_dir="/tmp",
+        )
+        names = [
+            c.kwargs["name"] for c in handler._repo.create_check_run.call_args_list
+        ]
+        assert names.count("tfworker/dep/apply") == 1
+
+    def test_post_apply_concludes_success_and_keeps_applied_plan(self):
+        handler, rollup, per_def = self.apply_handler()
+        handler._report.mark("mydef", "changes", detail="```diff\n+ planned\n```")
+        self.run(handler, TerraformStage.PRE)
+
+        ret = self.run(
+            handler, TerraformStage.POST, TerraformResult(0, APPLY_STDOUT, b"")
+        )
+
+        kwargs = per_def.edit.call_args.kwargs
+        assert kwargs["conclusion"] == "success"
+        assert kwargs["output"]["title"] == (
+            "Apply complete! Resources: 1 added, 0 changed, 0 destroyed."
+        )
+        assert "Creation complete" in kwargs["output"]["summary"]
+        assert "### Applied plan" in kwargs["output"]["text"]
+        assert "+ planned" in kwargs["output"]["text"]
+        assert handler._report.rows["mydef"].apply_status == "applied"
+        assert ret.action == TerraformAction.APPLY
+        assert ret.check_run_url == "https://github.test/apply"
+        assert ret.definition_check_url == "https://github.test/apply/mydef"
+
+    def test_error_stage_concludes_failure(self):
+        handler, rollup, per_def = self.apply_handler()
+        self.run(handler, TerraformStage.PRE)
+
+        self.run(
+            handler,
+            TerraformStage.ERROR,
+            TerraformResult(1, b"", b"Error: apply broke\n"),
+        )
+
+        kwargs = per_def.edit.call_args.kwargs
+        assert kwargs["conclusion"] == "failure"
+        assert "apply broke" in kwargs["output"]["summary"]
+        assert "text" not in kwargs["output"]
+        assert handler._report.rows["mydef"].apply_status == "failed"
+
+    def test_pre_apply_without_plan_state_reports_changes(self):
+        """An apply-only run that could not read the plan back still knows a
+        definition with a stored plan planned changes."""
+        handler, rollup, per_def = self.apply_handler(planning=False)
+        self.run(handler, TerraformStage.PRE)
+        assert handler._report.rows["mydef"].status == "changes"
+
+    def test_api_failure_is_recorded(self):
+        handler, rollup, per_def = self.apply_handler()
+        handler._repo.create_check_run.side_effect = RuntimeError("boom")
+        assert self.run(handler, TerraformStage.PRE) is None
+        assert handler._api_failures == 1
+
+    def test_post_without_result_is_ignored(self):
+        handler, rollup, per_def = self.apply_handler()
+        assert self.run(handler, TerraformStage.POST) is None
+
+    def test_teardown_concludes_apply_rollup(self):
+        handler, rollup, per_def = self.apply_handler()
+        handler._report.mark("mydef", "changes")
+        handler._report.mark("never_applied", "changes")
+        handler._report.mark("unchanged", "no_changes")
+        self.run(handler, TerraformStage.PRE)
+        self.run(handler, TerraformStage.ERROR, TerraformResult(1, b"", b"Error: x\n"))
+
+        handler.teardown("dep", "/tmp")
+
+        kwargs = rollup.edit.call_args.kwargs
+        assert kwargs["status"] == "completed"
+        assert kwargs["conclusion"] == "failure"
+        rows = handler._report.rows
+        assert rows["never_applied"].apply_status == "not_applied"
+        assert rows["unchanged"].apply_status is None
+
+    def test_teardown_skips_unconcluded_apply_checks(self):
+        handler, rollup, per_def = self.apply_handler()
+        self.run(handler, TerraformStage.PRE)
+
+        handler.teardown("dep", "/tmp")
+
+        kwargs = per_def.edit.call_args.kwargs
+        assert kwargs["conclusion"] == "skipped"
+        assert handler._report.rows["mydef"].apply_status == "not_applied"
+        assert rollup.edit.call_args.kwargs["conclusion"] == "success"
+
+    def test_apply_only_teardown_without_applies_leaves_comment(self):
+        handler = make_handler()
+        handler._planning = False
+        handler._comments = [mock.Mock(body="old")]
+
+        handler.teardown("dep", "/tmp")
+
+        handler._comments[0].edit.assert_not_called()
+        handler._check.edit.assert_not_called()
+
+    def test_apply_teardown_errors_are_logged(self):
+        handler, rollup, per_def = self.apply_handler()
+        self.run(handler, TerraformStage.PRE)
+        rollup.edit.side_effect = RuntimeError("boom")
+        handler.teardown("dep", "/tmp")  # does not raise
+
+    def test_plan_teardown_errors_do_not_block_apply_teardown(self):
+        handler, rollup, per_def = self.apply_handler()
+        self.run(handler, TerraformStage.PRE)
+        handler._check.edit.side_effect = RuntimeError("boom")
+        handler.teardown("dep", "/tmp")
+        assert rollup.edit.call_args.kwargs["status"] == "completed"
+
+    def test_apply_output_collapses_blank_runs(self):
+        out = GithubHandler._apply_output(APPLY_STDOUT.decode())
+        assert out.startswith("```\n")
+        assert "\n\n\n" not in out
+        assert GithubHandler._apply_output("\n\n") == ""
+
+    def test_apply_line_absent(self):
+        assert GithubHandler._apply_line("nothing here") == ""
+
+
+class TestApplyReport:
+    def make_report(self):
+        report = GithubStatusReport(
+            deployment="dep", marker="tfworker-status", max_detail_chars=100
+        )
+        report.mark("def1", "changes", plan_line="Plan: 1 to add")
+        return report
+
+    def test_apply_column_absent_until_an_apply(self):
+        report = self.make_report()
+        assert "| Apply |" not in report.render_comment_bodies()[0]
+        report.mark_apply("def1", "applied")
+        assert "| Apply |" in report.render_comment_bodies()[0]
+        assert "| ✅ applied |" in report.render_comment_bodies()[0]
+
+    def test_plan_check_summary_never_shows_apply(self):
+        report = self.make_report()
+        report.mark_apply("def1", "applied")
+        assert "| Apply |" not in report.render_check_summary()
+
+    def test_header_links_both_check_runs_in_the_comment_only(self):
+        report = self.make_report()
+        report.check_url = "https://github.test/plan"
+        report.apply_check_url = "https://github.test/apply"
+        links = (
+            "[View plan check run](https://github.test/plan) · "
+            "[View apply check run](https://github.test/apply)"
+        )
+        assert links in report.render_comment_bodies()[0]
+        assert "View apply check run" not in report.render_check_summary()
+
+    def test_apply_summary_lists_applied_definitions(self):
+        report = self.make_report()
+        report.ensure("untouched")
+        report.mark_apply("def1", "applied", apply_line="Apply complete!", detail="LOG")
+        report.set_apply_url("def1", "https://github.test/a")
+        summary = report.render_apply_summary()
+        assert summary.startswith("## Terraform apply status: `dep`")
+        assert "| [`def1`](https://github.test/a) | ✅ applied | Apply complete! |" in (
+            summary
+        )
+        assert "untouched" not in summary
+        assert "LOG" in summary
+
+    def test_apply_summary_over_budget_drops_details(self):
+        report = self.make_report()
+        report.max_detail_chars = 500
+        report.mark_apply("def1", "applied", detail="y" * 450)
+        with mock.patch("tfworker.handlers.github.BODY_BUDGET", 300):
+            summary = report.render_apply_summary()
+        assert "y" * 100 not in summary
+        assert "Detail sections omitted" in summary
+
+    def test_apply_conclusion_scoped_to_named_definitions(self):
+        report = self.make_report()
+        report.mark_apply("old", "failed")
+        report.mark_apply("def1", "applied")
+        assert report.apply_conclusion(["def1"]) == "success"
+        assert report.apply_conclusion(["def1", "old"]) == "failure"
+
+    def test_apply_summary_line(self):
+        report = self.make_report()
+        assert report.apply_summary_line() == "no definitions"
+        report.mark_apply("def1", "applied")
+        assert report.apply_summary_line() == "1 ✅ applied"
+
+
+def check_run(id, name, conclusion="success", title="", summary="", external_id=None):
+    run = mock.Mock()
+    run.id = id
+    run.name = name
+    run.conclusion = conclusion
+    run.external_id = external_id
+    run.html_url = f"https://github.test/runs/{id}"
+    run.output = SimpleNamespace(title=title, summary=summary)
+    return run
+
+
+class TestLoadRunState:
+    def handler_with_runs(self, *runs):
+        handler = make_handler()
+        handler._planning = False
+        handler._report = GithubStatusReport(
+            deployment="dep",
+            marker="tfworker-status",
+            max_detail_chars=8000,
+            run_id="run-1",
+        )
+        handler._repo.get_commit.return_value.get_check_runs.return_value = list(runs)
+        handler._issue.get_comments.return_value = []
+        return handler
+
+    def test_rebuilds_rows_from_this_runs_checks(self):
+        handler = self.handler_with_runs(
+            check_run(10, "tfworker/dep/plan", external_id="run-1"),
+            check_run(
+                11, "tfworker/dep/plan: a", title="No changes.", external_id="run-1"
+            ),
+            check_run(
+                12,
+                "tfworker/dep/plan: b",
+                title="Plan: 1 to add",
+                summary="DIFF",
+                external_id="run-1",
+            ),
+            check_run(
+                13, "tfworker/dep/plan: c", conclusion="failure", external_id="run-1"
+            ),
+            check_run(
+                14, "tfworker/dep/plan: d", conclusion="skipped", external_id="run-1"
+            ),
+            check_run(
+                15, "tfworker/dep/plan: e", title="Changes planned", external_id="run-1"
+            ),
+            # another run's checks on the same commit are ignored
+            check_run(20, "tfworker/dep/plan", external_id="run-2"),
+            check_run(21, "tfworker/dep/plan: z", external_id="run-2"),
+        )
+
+        handler._load_run_state("run-1")
+
+        rows = handler._report.rows
+        assert list(rows) == ["a", "b", "c", "d", "e"]
+        assert rows["a"].status == "no_changes"
+        assert rows["b"].status == "changes"
+        assert rows["b"].plan_line == "Plan: 1 to add"
+        assert rows["b"].detail == "DIFF"
+        assert rows["b"].url == "https://github.test/runs/12"
+        assert rows["c"].status == "failed"
+        assert rows["d"].status == "skipped"
+        assert rows["e"].plan_line == ""
+        assert handler._report.check_url == "https://github.test/runs/10"
+        get_runs = handler._repo.get_commit.return_value.get_check_runs
+        get_runs.assert_called_once_with(filter="all")
+        assert handler._comments_enabled is True
+
+    def test_legacy_definition_checks_matched_by_creation_order(self):
+        handler = self.handler_with_runs(
+            check_run(5, "tfworker/dep/plan: stale", title="Plan: old"),
+            check_run(10, "tfworker/dep/plan", external_id="run-1"),
+            check_run(11, "tfworker/dep/plan: a", title="Plan: 1 to add"),
+        )
+        handler._load_run_state("run-1")
+        assert list(handler._report.rows) == ["a"]
+
+    def test_newest_check_wins_keeping_position(self):
+        handler = self.handler_with_runs(
+            check_run(10, "tfworker/dep/plan", external_id="run-1"),
+            check_run(
+                11, "tfworker/dep/plan: a", conclusion="failure", external_id="run-1"
+            ),
+            check_run(12, "tfworker/dep/plan: b", external_id="run-1"),
+            check_run(
+                13, "tfworker/dep/plan: a", title="Plan: 2 to add", external_id="run-1"
+            ),
+        )
+        handler._load_run_state("run-1")
+        rows = handler._report.rows
+        assert list(rows) == ["a", "b"]
+        assert rows["a"].status == "changes"
+
+    def test_prior_applies_of_the_run_are_loaded(self):
+        handler = self.handler_with_runs(
+            check_run(10, "tfworker/dep/plan", external_id="run-1"),
+            check_run(11, "tfworker/dep/plan: a", title="Plan: 1", external_id="run-1"),
+            check_run(12, "tfworker/dep/plan: b", title="Plan: 1", external_id="run-1"),
+            check_run(13, "tfworker/dep/plan: c", title="Plan: 1", external_id="run-1"),
+            check_run(14, "tfworker/dep/plan: d", title="Plan: 1", external_id="run-1"),
+            check_run(
+                20,
+                "tfworker/dep/apply: a",
+                title="Apply complete!",
+                external_id="run-1",
+            ),
+            check_run(
+                21,
+                "tfworker/dep/apply: b",
+                conclusion="failure",
+                title="Terraform apply failed",
+                external_id="run-1",
+            ),
+            check_run(
+                22, "tfworker/dep/apply: c", conclusion="skipped", external_id="run-1"
+            ),
+            check_run(
+                23, "tfworker/dep/apply: d", conclusion=None, external_id="run-1"
+            ),
+            check_run(
+                24, "tfworker/dep/apply: a", title="ignored", external_id="run-2"
+            ),
+        )
+        handler._load_run_state("run-1")
+        rows = handler._report.rows
+        assert rows["a"].apply_status == "applied"
+        assert rows["a"].apply_line == "Apply complete!"
+        assert rows["a"].apply_url == "https://github.test/runs/20"
+        assert rows["b"].apply_status == "failed"
+        assert rows["b"].apply_line == ""
+        assert rows["c"].apply_status == "not_applied"
+        assert rows["d"].apply_status is None
+
+    def test_claims_comment_of_this_run(self):
+        handler = self.handler_with_runs(
+            check_run(10, "tfworker/dep/plan", external_id="run-1"),
+        )
+        mine = mock.Mock(body="<!-- tfworker-status: dep -->\nRun `run-1`\n")
+        handler._issue.get_comments.return_value = [mine]
+        handler._load_run_state("run-1")
+        assert handler._comments == [mine]
+        assert handler._comments_enabled is True
+
+    def test_comment_of_another_run_is_left_alone(self):
+        handler = self.handler_with_runs(
+            check_run(10, "tfworker/dep/plan", external_id="run-1"),
+        )
+        newer = mock.Mock(body="<!-- tfworker-status: dep -->\nRun `run-2`\n")
+        handler._issue.get_comments.return_value = [newer]
+
+        handler._load_run_state("run-1")
+        handler._update_comments()
+
+        assert handler._comments_enabled is False
+        newer.edit.assert_not_called()
+
+    def test_no_plan_rollup_disables_comments(self):
+        handler = self.handler_with_runs(
+            check_run(10, "tfworker/dep/plan", external_id="run-2"),
+        )
+        handler._load_run_state("run-1")
+        assert handler._comments_enabled is False
+        assert handler._report.rows == {}
+
+    def test_no_run_id_disables_comments(self):
+        handler = self.handler_with_runs()
+        handler._load_run_state(None)
+        assert handler._comments_enabled is False
+        handler._repo.get_commit.assert_not_called()
+
+    def test_read_failure_disables_comments_not_the_handler(self):
+        handler = self.handler_with_runs()
+        handler._repo.get_commit.side_effect = RuntimeError("boom")
+        handler._load_run_state("run-1")
+        assert handler._comments_enabled is False
+        assert handler.is_ready() is True
+
+    def test_disable_without_a_pr_does_not_warn(self):
+        handler = make_handler(with_pr=False)
+        with mock.patch("tfworker.handlers.github.log.warn") as warn:
+            handler._disable_comments("reason")
+        warn.assert_not_called()
+        assert handler._comments_enabled is False
+
+    def test_plan_status_of_an_unfinished_check(self):
+        run = check_run(1, "x", conclusion=None)
+        assert GithubHandler._plan_status(run) == ("pending", "")
+
+
+class TestAccessors:
+    def test_report_and_repo_raise_before_setup(self):
+        handler = GithubHandler(make_config())
+        with pytest.raises(HandlerError):
+            handler.report
+        with pytest.raises(HandlerError):
+            handler.repo

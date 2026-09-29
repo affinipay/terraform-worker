@@ -1,4 +1,4 @@
-"""GitHub handler for reporting plan status to a pull request.
+"""GitHub handler for reporting plan and apply status to a pull request.
 
 Authenticates as a GitHub App and, for plan runs, maintains:
 
@@ -9,6 +9,11 @@ Authenticates as a GitHub App and, for plan runs, maintains:
   updated in place as each definition plans; per-definition detail is
   included only when comment_details is enabled, split across additional
   comments when the body exceeds GitHub's size limit
+
+Applies get their own rollup and per-definition check runs, which keep the
+applied plan, and an Apply column in the status comment. An apply-only run
+rebuilds the comment from the check runs tagged with its run id, and leaves a
+comment reporting another run untouched.
 
 When the openai handler is also configured, its plan summary is embedded in
 the per-definition details; otherwise a trimmed copy of the plan output is
@@ -30,7 +35,7 @@ import re
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Mapping
 
 import click
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -187,7 +192,7 @@ class GithubConfig(BaseModel):
     )
     commit_sha: str | None = Field(
         default=None,
-        description="Commit sha for the check runs; defaults to the PR head sha, then GITHUB_SHA.",
+        description="Commit sha for the check runs; defaults to the PR head sha, then GITHUB_SHA. Apply-only runs prefer GITHUB_SHA, the planned commit.",
     )
     app_id: str | None = Field(
         default=None,
@@ -209,6 +214,10 @@ class GithubConfig(BaseModel):
     check_run_name: str | None = Field(
         default=None,
         description="Name of the check run; defaults to 'tfworker/<deployment>/plan'.",
+    )
+    apply_check_run_name: str | None = Field(
+        default=None,
+        description="Name of the apply check run; defaults to 'tfworker/<deployment>/apply'.",
     )
     comment_marker: str = "tfworker-status"
     comment_details: bool = Field(
@@ -236,6 +245,7 @@ class GithubConfig(BaseModel):
         "private_key_file",
         "installation_id",
         "check_run_name",
+        "apply_check_run_name",
         mode="before",
     )
     @classmethod
@@ -298,6 +308,15 @@ STATUS_DISPLAY: dict[PlanStatus, str] = {
     "skipped": "⏭️ skipped",
 }
 
+ApplyStatus = Literal["running", "applied", "failed", "not_applied"]
+
+APPLY_DISPLAY: dict[ApplyStatus, str] = {
+    "running": "🚀 applying",
+    "applied": "✅ applied",
+    "failed": "❌ failed",
+    "not_applied": "⏭️ not applied",
+}
+
 
 @dataclass
 class DefinitionStatus:
@@ -307,6 +326,10 @@ class DefinitionStatus:
     plan_line: str = ""
     detail: str = ""
     url: str = ""
+    apply_status: ApplyStatus | None = None
+    apply_line: str = ""
+    apply_detail: str = ""
+    apply_url: str = ""
 
 
 class GithubStatusReport:
@@ -326,6 +349,7 @@ class GithubStatusReport:
         self.include_details = include_details
         self.run_id = run_id
         self.check_url: str | None = None
+        self.apply_check_url: str | None = None
         self._rows: dict[str, DefinitionStatus] = {}
 
     @property
@@ -358,44 +382,108 @@ class GithubStatusReport:
         if detail:
             row.detail = detail
 
+    def set_apply_url(self, name: str, url: str) -> None:
+        self.ensure(name).apply_url = url
+
+    def mark_apply(
+        self, name: str, status: ApplyStatus, apply_line: str = "", detail: str = ""
+    ) -> None:
+        row = self.ensure(name)
+        row.apply_status = status
+        if apply_line:
+            row.apply_line = apply_line
+        if detail:
+            row.apply_detail = detail
+
+    @property
+    def has_apply(self) -> bool:
+        return any(r.apply_status for r in self._rows.values())
+
     def finalize(self) -> None:
         """Mark anything that never ran as skipped (aborted or filtered runs)."""
         for row in self._rows.values():
             if row.status in ("pending", "running"):
                 row.status = "skipped"
 
+    def finalize_apply(self) -> None:
+        """Mark planned changes that were not applied, including any an aborted apply never reached."""
+        for row in self._rows.values():
+            unapplied = row.status == "changes" and row.apply_status is None
+            if unapplied or row.apply_status == "running":
+                row.apply_status = "not_applied"
+
     def conclusion(self) -> str:
         if any(r.status == "failed" for r in self._rows.values()):
             return "failure"
         return "success"
 
-    def summary_line(self) -> str:
-        counts: dict[PlanStatus, int] = {}
-        for row in self._rows.values():
-            counts[row.status] = counts.get(row.status, 0) + 1
-        parts = [
-            f"{counts[s]} {STATUS_DISPLAY[s]}" for s in STATUS_DISPLAY if s in counts
-        ]
+    def apply_conclusion(self, names: Iterable[str]) -> str:
+        """The conclusion of the named definitions' applies."""
+        if any(self.ensure(n).apply_status == "failed" for n in names):
+            return "failure"
+        return "success"
+
+    @staticmethod
+    def _count(statuses: Iterable[str], display: Mapping[Any, str]) -> str:
+        counts: dict[str, int] = {}
+        for status in statuses:
+            counts[status] = counts.get(status, 0) + 1
+        parts = [f"{counts[s]} {display[s]}" for s in display if s in counts]
         return ", ".join(parts) if parts else "no definitions"
 
-    def _header(self) -> str:
-        lines = [f"## Terraform plan status: `{self.deployment}`", ""]
+    def summary_line(self) -> str:
+        return self._count((r.status for r in self._rows.values()), STATUS_DISPLAY)
+
+    def apply_summary_line(self) -> str:
+        statuses = (r.apply_status for r in self._rows.values() if r.apply_status)
+        return self._count(statuses, APPLY_DISPLAY)
+
+    def _header(self, kind: str = "plan", include_apply: bool = False) -> str:
+        lines = [f"## Terraform {kind} status: `{self.deployment}`", ""]
         if self.run_id:
             # the id the stored plans are keyed by, so an apply can request exactly these plans
             lines.append(f"Run `{self.run_id}`")
             lines.append("")
+        links = []
         if self.check_url:
-            lines.append(f"[View check run]({self.check_url})")
+            links.append(f"[View plan check run]({self.check_url})")
+        if include_apply and self.apply_check_url:
+            links.append(f"[View apply check run]({self.apply_check_url})")
+        if links:
+            lines.append(" · ".join(links))
             lines.append("")
         return "\n".join(lines)
 
-    def _table(self) -> str:
-        lines = ["| Definition | Status | Plan |", "| --- | --- | --- |"]
+    def _table(self, include_apply: bool = False) -> str:
+        include_apply = include_apply and self.has_apply
+        header = "| Definition | Status | Plan |"
+        rule = "| --- | --- | --- |"
+        if include_apply:
+            header, rule = f"{header} Apply |", f"{rule} --- |"
+        lines = [header, rule]
         for name, row in self._rows.items():
             label = f"[`{name}`]({row.url})" if row.url else f"`{name}`"
-            lines.append(
-                f"| {label} | {STATUS_DISPLAY[row.status]} | {row.plan_line} |"
-            )
+            line = f"| {label} | {STATUS_DISPLAY[row.status]} | {row.plan_line} |"
+            if include_apply:
+                line += f" {self._apply_cell(row)} |"
+            lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _apply_cell(row: DefinitionStatus) -> str:
+        if row.apply_status is None:
+            return ""
+        display = APPLY_DISPLAY[row.apply_status]
+        return f"[{display}]({row.apply_url})" if row.apply_url else display
+
+    def _apply_table(self) -> str:
+        lines = ["| Definition | Apply | Result |", "| --- | --- | --- |"]
+        for name, row in self._rows.items():
+            if row.apply_status is None:
+                continue
+            label = f"[`{name}`]({row.apply_url})" if row.apply_url else f"`{name}`"
+            display = APPLY_DISPLAY[row.apply_status]
+            lines.append(f"| {label} | {display} | {row.apply_line} |")
         return "\n".join(lines)
 
     def _wrap_details(
@@ -434,7 +522,14 @@ class GithubStatusReport:
 
     def render_comment_bodies(self) -> list[str]:
         """The primary comment with the table, plus continuation comments for detail that does not fit."""
-        primary = "\n".join([self.primary_marker, self._header(), self._table(), ""])
+        primary = "\n".join(
+            [
+                self.primary_marker,
+                self._header(include_apply=True),
+                self._table(include_apply=True),
+                "",
+            ]
+        )
         bodies = [primary]
         if not self.include_details:
             return bodies
@@ -472,19 +567,43 @@ class GithubStatusReport:
             )
         return body
 
+    def render_apply_summary(self) -> str:
+        """The apply rollup check run output markdown."""
+        head = [self._header(kind="apply"), self._apply_table(), ""]
+        blocks = []
+        for name, row in self._rows.items():
+            if row.apply_status is None or not row.apply_detail:
+                continue
+            apply_line = f" — {row.apply_line}" if row.apply_line else ""
+            body = _fence_safe_truncate(row.apply_detail, self.max_detail_chars)
+            blocks.append(
+                "<details>\n"
+                f"<summary><code>{name}</code> — {APPLY_DISPLAY[row.apply_status]}"
+                f"{apply_line}</summary>\n\n"
+                f"{body}\n\n"
+                "</details>"
+            )
+        body = "\n".join(head + blocks)
+        if len(body) > BODY_BUDGET:
+            body = "\n".join(
+                head + ["_Detail sections omitted; body exceeded GitHub's size limit._"]
+            )
+        return body
+
 
 StageFunction = Callable[..., "GithubResult | None"]
 
 
 @HandlerRegistry.register("github")
 class GithubHandler(BaseHandler):
-    """Report plan progress and results to GitHub."""
+    """Report plan and apply progress and results to GitHub."""
 
-    actions = [TerraformAction.PLAN]
+    actions = [TerraformAction.PLAN, TerraformAction.APPLY]
     config_model = GithubConfig
     _ready = False
     default_priority = {
         TerraformAction.PLAN: 90,
+        TerraformAction.APPLY: 90,
     }
     # run after openai, when configured, so its plan summary is in the shared results
     dependencies = {
@@ -500,8 +619,16 @@ class GithubHandler(BaseHandler):
         self._check: "CheckRun | None" = None
         self._def_checks: dict[str, "CheckRun"] = {}
         self._def_concluded: set[str] = set()
+        self._apply_check: "CheckRun | None" = None
+        self._apply_checks: dict[str, "CheckRun"] = {}
+        self._apply_concluded: set[str] = set()
+        self._deployment = ""
+        self._head_sha = ""
+        self._planning = True
         self._report: GithubStatusReport | None = None
         self._comments: list["IssueComment"] = []
+        self._comments_enabled = True
+        self._comment_failures = 0
         self._api_failures = 0
         self.execution_functions: dict[
             TerraformAction, dict[TerraformStage, StageFunction]
@@ -510,6 +637,11 @@ class GithubHandler(BaseHandler):
                 TerraformStage.PRE: self._pre_plan,
                 TerraformStage.POST: self._post_plan,
                 TerraformStage.ERROR: self._plan_error,
+            },
+            TerraformAction.APPLY: {
+                TerraformStage.PRE: self._pre_apply,
+                TerraformStage.POST: self._post_apply,
+                TerraformStage.ERROR: self._apply_error,
             },
         }
 
@@ -536,6 +668,18 @@ class GithubHandler(BaseHandler):
         except (AttributeError, RuntimeError):  # no click context or root options
             return None
 
+    @property
+    def report(self) -> GithubStatusReport:
+        if self._report is None:
+            raise HandlerError("github handler: no report before setup")
+        return self._report
+
+    @property
+    def repo(self) -> "Repository":
+        if self._repo is None:
+            raise HandlerError("github handler: not connected")
+        return self._repo
+
     def is_ready(self) -> bool:
         return self._ready
 
@@ -549,13 +693,15 @@ class GithubHandler(BaseHandler):
         working_dir: str,
         terraform_options,
     ) -> None:
-        """Authenticate, create the check runs, and seed the status comment."""
+        """Authenticate, create the plan check runs, and seed the comment; an apply-only run rebuilds the report instead."""
         if not self._ready:
             return
-        if not terraform_options.plan:
-            log.debug("github handler: plan not requested, nothing to report")
+        if not terraform_options.plan and not terraform_options.apply:
+            log.debug("github handler: neither plan nor apply requested")
             self._ready = False
             return
+        self._planning = bool(terraform_options.plan)
+        self._deployment = deployment
         try:
             self._connect()
             run_id = self._run_id()
@@ -566,33 +712,36 @@ class GithubHandler(BaseHandler):
                 include_details=self.config.comment_details,
                 run_id=run_id,
             )
-            for defn in definitions.values():
-                self._report.ensure(defn.name)
-            # needs the report: the claimed marker is scoped to the deployment
-            self._claim_comments()
+            self._head_sha = self._resolve_sha(for_apply=not self._planning)
+            if not self._planning:
+                self._load_run_state(run_id)
+                return
 
-            head_sha = self._resolve_sha()
-            check_name = self.config.check_run_name or f"tfworker/{deployment}/plan"
-            check_kwargs: dict[str, Any] = {"external_id": run_id} if run_id else {}
-            self._check = self._repo.create_check_run(
-                name=check_name,
-                head_sha=head_sha,
+            for defn in definitions.values():
+                self.report.ensure(defn.name)
+            # needs the report: the claimed marker is scoped to the deployment
+            self._claim_comments_safely()
+
+            self._check = self.repo.create_check_run(
+                name=self._plan_check_name,
+                head_sha=self._head_sha,
                 status="in_progress",
                 output={
                     "title": "Terraform plan in progress",
-                    "summary": self._report.render_check_summary(),
+                    "summary": self.report.render_check_summary(),
                 },
-                **check_kwargs,
+                **self._external_id(),
             )
-            self._report.check_url = self._check.html_url
+            self.report.check_url = self._check.html_url
             for defn in definitions.values():
-                check = self._repo.create_check_run(
-                    name=f"{check_name}: {defn.name}",
-                    head_sha=head_sha,
+                check = self.repo.create_check_run(
+                    name=f"{self._plan_check_name}: {defn.name}",
+                    head_sha=self._head_sha,
                     status="queued",
+                    **self._external_id(),
                 )
                 self._def_checks[defn.name] = check
-                self._report.set_url(defn.name, check.html_url)
+                self.report.set_url(defn.name, check.html_url)
             self._update_comments()
         except Exception as e:
             log.error(f"github handler setup failed: {e}")
@@ -626,24 +775,44 @@ class GithubHandler(BaseHandler):
         """Conclude the check runs and finalize the comment."""
         if self._report is None:
             return
-        try:
-            self._report.finalize()
-            for name in self._def_checks:
-                self._conclude_def_check(name, "skipped", "Plan skipped")
-            conclusion = self._report.conclusion()
-            title = f"Terraform plan {conclusion}: {self._report.summary_line()}"
-            if self._check is not None:
-                self._check.edit(
+        if self._planning:
+            try:
+                self.report.finalize()
+                for name in self._def_checks:
+                    self._conclude_def_check(name, "skipped", "Plan skipped")
+                conclusion = self.report.conclusion()
+                title = f"Terraform plan {conclusion}: {self.report.summary_line()}"
+                if self._check is not None:
+                    self._check.edit(
+                        status="completed",
+                        conclusion=conclusion,
+                        output={
+                            "title": title,
+                            "summary": self.report.render_check_summary(),
+                        },
+                    )
+            except Exception as e:
+                log.error(f"github handler plan teardown failed: {e}")
+        if self._apply_check is not None:
+            try:
+                self.report.finalize_apply()
+                for name in self._apply_checks:
+                    self._conclude_apply_check(name, "skipped", "Apply not completed")
+                conclusion = self.report.apply_conclusion(self._apply_checks)
+                summary_line = self.report.apply_summary_line()
+                self._apply_check.edit(
                     status="completed",
                     conclusion=conclusion,
                     output={
-                        "title": title,
-                        "summary": self._report.render_check_summary(),
+                        "title": f"Terraform apply {conclusion}: {summary_line}",
+                        "summary": self.report.render_apply_summary(),
                     },
                 )
+            except Exception as e:
+                log.error(f"github handler apply teardown failed: {e}")
+        # an apply-only run that applied nothing leaves the comment as it was
+        if self._planning or self._apply_check is not None:
             self._update_comments()
-        except Exception as e:
-            log.error(f"github handler teardown failed: {e}")
 
     ###########################################################################
     # plan handling
@@ -651,7 +820,7 @@ class GithubHandler(BaseHandler):
     def _pre_plan(
         self, definition: "Definition", result: "TerraformResult | None" = None
     ) -> None:
-        self._report.mark(definition.name, "running")
+        self.report.mark(definition.name, "running")
         check = self._def_checks.get(definition.name)
         if check is not None:
             check.edit(status="in_progress")
@@ -661,7 +830,7 @@ class GithubHandler(BaseHandler):
         self, definition: "Definition", result: "TerraformResult"
     ) -> GithubResult:
         if result.exit_code == 0:
-            self._report.mark(definition.name, "no_changes", plan_line="No changes.")
+            self.report.mark(definition.name, "no_changes", plan_line="No changes.")
             self._conclude_def_check(definition.name, "success", "No changes.")
         elif result.has_changes():
             text = strip_ansi(result.stdout_str)
@@ -669,7 +838,7 @@ class GithubHandler(BaseHandler):
                 text, self.config.wrap_width
             )
             plan_line = self._plan_line(text)
-            self._report.mark(
+            self.report.mark(
                 definition.name, "changes", plan_line=plan_line, detail=detail
             )
             self._conclude_def_check(
@@ -677,7 +846,7 @@ class GithubHandler(BaseHandler):
             )
         else:
             error_detail = self._error_detail(result)
-            self._report.mark(definition.name, "failed", detail=error_detail)
+            self.report.mark(definition.name, "failed", detail=error_detail)
             self._conclude_def_check(
                 definition.name, "failure", "Terraform plan failed", error_detail
             )
@@ -696,7 +865,7 @@ class GithubHandler(BaseHandler):
 
     def _plan_error(self, definition: "Definition", result: "TerraformResult") -> None:
         detail = self._error_detail(result)
-        self._report.mark(definition.name, "failed", detail=detail)
+        self.report.mark(definition.name, "failed", detail=detail)
         self._conclude_def_check(
             definition.name, "failure", "Terraform plan failed", detail
         )
@@ -755,6 +924,104 @@ class GithubHandler(BaseHandler):
         return f"```\n{snippet}\n```" if snippet else ""
 
     ###########################################################################
+    # apply handling
+    ###########################################################################
+    def _pre_apply(
+        self, definition: "Definition", result: "TerraformResult | None" = None
+    ) -> None:
+        name = definition.name
+        row = self.report.ensure(name)
+        # a definition with a stored plan planned changes, even when its plan check was not read back
+        if not self._planning and row.status == "pending":
+            row.status = "changes"
+        self.report.mark_apply(name, "running")
+        self._ensure_apply_check()
+        check = self.repo.create_check_run(
+            name=f"{self._apply_check_name}: {name}",
+            head_sha=self._head_sha,
+            status="in_progress",
+            **self._external_id(),
+        )
+        self._apply_checks[name] = check
+        self.report.set_apply_url(name, check.html_url)
+        self._update_comments()
+        self._update_apply_check("Terraform apply in progress")
+
+    def _post_apply(
+        self, definition: "Definition", result: "TerraformResult"
+    ) -> GithubResult:
+        text = strip_ansi(result.stdout_str)
+        apply_line = self._apply_line(text)
+        detail = self._apply_output(text, self.config.wrap_width)
+        self.report.mark_apply(
+            definition.name, "applied", apply_line=apply_line, detail=detail
+        )
+        self._conclude_apply_check(
+            definition.name, "success", apply_line or "Apply complete", detail
+        )
+        return self._apply_result(definition, TerraformStage.POST)
+
+    def _apply_error(
+        self, definition: "Definition", result: "TerraformResult"
+    ) -> GithubResult:
+        detail = self._error_detail(result)
+        self.report.mark_apply(definition.name, "failed", detail=detail)
+        self._conclude_apply_check(
+            definition.name, "failure", "Terraform apply failed", detail
+        )
+        return self._apply_result(definition, TerraformStage.ERROR)
+
+    def _apply_result(
+        self, definition: "Definition", stage: TerraformStage
+    ) -> GithubResult:
+        self._update_comments()
+        self._update_apply_check("Terraform apply in progress")
+        def_check = self._apply_checks.get(definition.name)
+        return GithubResult(
+            handler="github",
+            action=TerraformAction.APPLY,
+            stage=stage,
+            definition=definition.name,
+            check_run_url=self._apply_check.html_url if self._apply_check else None,
+            definition_check_url=def_check.html_url if def_check else None,
+            comment_url=self._comments[0].html_url if self._comments else None,
+        )
+
+    def _ensure_apply_check(self) -> None:
+        if self._apply_check is not None:
+            return
+        self._apply_check = self.repo.create_check_run(
+            name=self._apply_check_name,
+            head_sha=self._head_sha,
+            status="in_progress",
+            output={
+                "title": "Terraform apply in progress",
+                "summary": self.report.render_apply_summary(),
+            },
+            **self._external_id(),
+        )
+        self.report.apply_check_url = self._apply_check.html_url
+
+    @staticmethod
+    def _apply_line(text: str) -> str:
+        for line in text.splitlines():
+            if line.startswith("Apply complete!"):
+                return line.strip()
+        return ""
+
+    @staticmethod
+    def _apply_output(text: str, wrap_width: int = 0) -> str:
+        """The apply log with blank-line runs collapsed, fenced for markdown."""
+        lines: list[str] = []
+        for line in text.rstrip().splitlines():
+            if line.strip() or (lines and lines[-1].strip()):
+                lines.append(line.rstrip())
+        trimmed = "\n".join(lines).strip("\n")
+        if not trimmed:
+            return ""
+        return f"```\n{_hard_wrap(trimmed, wrap_width)}\n```"
+
+    ###########################################################################
     # github api plumbing
     ###########################################################################
     def _connect(self) -> None:
@@ -770,17 +1037,29 @@ class GithubHandler(BaseHandler):
         gh = integration.get_github_for_installation(installation_id)
         self._repo = gh.get_repo(self.config.repository)
         if self.config.pull_request:
-            self._pr = self._repo.get_pull(self.config.pull_request)
-            self._issue = self._repo.get_issue(self.config.pull_request)
+            self._pr = self.repo.get_pull(self.config.pull_request)
+            self._issue = self.repo.get_issue(self.config.pull_request)
 
-    def _resolve_sha(self) -> str:
-        """The commit to report on: commit_sha, then the PR head, then GITHUB_SHA."""
-        # GITHUB_SHA is a merge commit on pull_request events; its checks do not render on the PR
-        sha = (
-            self.config.commit_sha
-            or (self._pr.head.sha if self._pr is not None else None)
-            or os.environ.get("GITHUB_SHA")
-        )
+    @property
+    def _plan_check_name(self) -> str:
+        return self.config.check_run_name or f"tfworker/{self._deployment}/plan"
+
+    @property
+    def _apply_check_name(self) -> str:
+        return self.config.apply_check_run_name or f"tfworker/{self._deployment}/apply"
+
+    def _external_id(self) -> dict[str, Any]:
+        """Check run kwargs tagging it with the run id."""
+        run_id = self._run_id()
+        return {"external_id": run_id} if run_id else {}
+
+    def _resolve_sha(self, for_apply: bool = False) -> str:
+        """The commit to report on: commit_sha, then the PR head or GITHUB_SHA, whichever the action prefers."""
+        # GITHUB_SHA is a merge commit on pull_request plan events; an apply's names the planned commit
+        pr_head = self._pr.head.sha if self._pr is not None else None
+        env_sha = os.environ.get("GITHUB_SHA")
+        fallbacks = (env_sha, pr_head) if for_apply else (pr_head, env_sha)
+        sha = self.config.commit_sha or next((s for s in fallbacks if s), None)
         if not sha:
             raise HandlerError("no commit to report on; set commit_sha or GITHUB_SHA")
         return sha
@@ -789,8 +1068,8 @@ class GithubHandler(BaseHandler):
         """Adopt this deployment's status comments from a prior run so they are edited, not duplicated."""
         if self._issue is None or self._report is None:
             return
-        primary_marker = self._report.primary_marker
-        part_prefix = f"{self._report.marker_prefix()} part="
+        primary_marker = self.report.primary_marker
+        part_prefix = f"{self.report.marker_prefix()} part="
         primary, parts = None, []
         for comment in self._issue.get_comments():
             # exact first-line match: one deployment must not claim another whose name it prefixes
@@ -801,25 +1080,147 @@ class GithubHandler(BaseHandler):
                 parts.append(comment)
         self._comments = ([primary] if primary else []) + parts
 
-    def _update_comments(self) -> None:
-        if self._issue is None or self._report is None:
+    def _claim_comments_safely(self) -> None:
+        try:
+            self._claim_comments()
+        except Exception as e:
+            # without the existing comments an update would post duplicates
+            self._disable_comments(f"unable to read existing comments: {e}")
+
+    def _disable_comments(self, reason: str) -> None:
+        """Stop updating the status comment; check runs are unaffected."""
+        if self._comments_enabled and self._issue is not None:
+            log.warn(f"github handler: not updating the status comment; {reason}")
+        self._comments_enabled = False
+
+    def _load_run_state(self, run_id: str | None) -> None:
+        """Rebuild the report from the run's check runs and claim its comment; failures only disable the comment."""
+        if not run_id:
+            self._disable_comments("no run id to match the plan to")
             return
-        bodies = self._report.render_comment_bodies()
-        for i, body in enumerate(bodies):
-            if i < len(self._comments):
-                if self._comments[i].body != body:
-                    self._comments[i].edit(body)
-            else:
-                self._comments.append(self._issue.create_comment(body))
-        # remove continuation comments left over from a larger update
-        while len(self._comments) > len(bodies):
-            self._comments.pop().delete()
+        try:
+            found = self._load_check_runs(run_id)
+        except Exception as e:
+            self._disable_comments(f"unable to read the plan check runs: {e}")
+            return
+        if not found:
+            self._disable_comments(
+                f"no plan check run for run {run_id} on {self._head_sha[:12]}"
+            )
+            return
+        self._claim_comments_safely()
+        if self._comments and f"Run `{run_id}`" not in (self._comments[0].body or ""):
+            self._disable_comments("it reports a different run")
+
+    def _load_check_runs(self, run_id: str) -> bool:
+        """Populate the report from the run's plan and apply check runs; False without a plan rollup."""
+        runs = sorted(
+            self.repo.get_commit(self._head_sha).get_check_runs(filter="all"),
+            key=lambda r: r.id,
+        )
+        rollup = next(
+            (
+                r
+                for r in reversed(runs)
+                if r.name == self._plan_check_name and r.external_id == run_id
+            ),
+            None,
+        )
+        if rollup is None:
+            return False
+        self.report.check_url = rollup.html_url
+        plan_prefix = f"{self._plan_check_name}: "
+        apply_prefix = f"{self._apply_check_name}: "
+        plans: dict[str, "CheckRun"] = {}
+        applies: dict[str, "CheckRun"] = {}
+        # ascending ids: the newest check wins while keeping the definition's first position
+        for run in runs:
+            if run.name.startswith(plan_prefix):
+                # untagged per-definition checks predate external_id; match those created after the rollup
+                if run.external_id == run_id or (
+                    not run.external_id and run.id > rollup.id
+                ):
+                    plans[run.name.removeprefix(plan_prefix)] = run
+            elif run.name.startswith(apply_prefix) and run.external_id == run_id:
+                applies[run.name.removeprefix(apply_prefix)] = run
+        for name, run in plans.items():
+            status, plan_line = self._plan_status(run)
+            summary = run.output.summary if run.output else ""
+            self.report.mark(name, status, plan_line=plan_line, detail=summary or "")
+            self.report.set_url(name, run.html_url)
+        for name, run in applies.items():
+            apply_status = self._apply_status(run)
+            if apply_status is None:
+                continue
+            title = (run.output.title if run.output else "") or ""
+            summary = run.output.summary if run.output else ""
+            self.report.mark_apply(
+                name,
+                apply_status,
+                apply_line=title.strip() if apply_status == "applied" else "",
+                detail=summary or "",
+            )
+            self.report.set_apply_url(name, run.html_url)
+        return True
+
+    @staticmethod
+    def _plan_status(run: "CheckRun") -> tuple[PlanStatus, str]:
+        """A plan check run's status and plan line; the title separates changes from none."""
+        if run.conclusion == "failure":
+            return "failed", ""
+        if run.conclusion == "skipped":
+            return "skipped", ""
+        if run.conclusion != "success":
+            return "pending", ""
+        title = ((run.output.title if run.output else "") or "").strip()
+        if title.lower().startswith("no changes"):
+            return "no_changes", title
+        return "changes", "" if title == "Changes planned" else title
+
+    @staticmethod
+    def _apply_status(run: "CheckRun") -> ApplyStatus | None:
+        """An apply check run's status; None while unfinished."""
+        statuses: dict[str, ApplyStatus] = {
+            "success": "applied",
+            "failure": "failed",
+            "skipped": "not_applied",
+        }
+        return statuses.get(run.conclusion)
+
+    def _update_comments(self) -> None:
+        if self._issue is None or self._report is None or not self._comments_enabled:
+            return
+        try:
+            bodies = self.report.render_comment_bodies()
+            for i, body in enumerate(bodies):
+                if i < len(self._comments):
+                    if self._comments[i].body != body:
+                        self._comments[i].edit(body)
+                else:
+                    self._comments.append(self._issue.create_comment(body))
+            # remove continuation comments left over from a larger update
+            while len(self._comments) > len(bodies):
+                self._comments.pop().delete()
+        except Exception as e:
+            self._comment_failures += 1
+            log.warn(f"github handler: status comment update failed: {e}")
+            if self._comment_failures >= MAX_API_FAILURES:
+                self._disable_comments(f"{self._comment_failures} consecutive failures")
+            return
+        self._comment_failures = 0
 
     def _update_check(self, title: str) -> None:
         if self._check is None or self._report is None:
             return
         self._check.edit(
-            output={"title": title, "summary": self._report.render_check_summary()}
+            output={"title": title, "summary": self.report.render_check_summary()}
+        )
+
+    def _update_apply_check(self, title: str) -> None:
+        if self._apply_check is None or self._report is None:
+            return
+        self._apply_check.edit(
+            output={"title": title, "summary": self.report.render_apply_summary()}
         )
 
     def _conclude_def_check(
@@ -838,6 +1239,25 @@ class GithubHandler(BaseHandler):
                 "summary": _fence_safe_truncate(summary, BODY_BUDGET),
             },
         )
+
+    def _conclude_apply_check(
+        self, name: str, conclusion: str, title: str, summary: str = ""
+    ) -> None:
+        """Complete a per-definition apply check run, with the applied plan as its text."""
+        check = self._apply_checks.get(name)
+        if check is None or name in self._apply_concluded:
+            return
+        self._apply_concluded.add(name)
+        output = {
+            "title": title[:255],
+            "summary": _fence_safe_truncate(summary, BODY_BUDGET),
+        }
+        plan = self.report.ensure(name).detail if self._report else ""
+        if plan:
+            output["text"] = _fence_safe_truncate(
+                f"### Applied plan\n\n{plan}", BODY_BUDGET
+            )
+        check.edit(status="completed", conclusion=conclusion, output=output)
 
     def _record_api_failure(self, context: str, exc: Exception) -> None:
         self._api_failures += 1
