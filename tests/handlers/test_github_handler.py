@@ -27,6 +27,9 @@ GITHUB_ENV_VARS = [
     "GITHUB_SHA",
     "GITHUB_CHECK_DETAILS_URL",
     "GITHUB_CHECK_DEFINITION_DETAILS_URL",
+    "GITHUB_CHECK_LOGS_URL",
+    "GITHUB_CHECK_DEFINITION_LOGS_URL",
+    "GITHUB_CHECK_LOGS_LABEL",
 ]
 
 
@@ -1367,6 +1370,16 @@ class TestApplyReport:
         assert links in report.render_comment_bodies()[0]
         assert "View apply check run" not in report.render_check_summary()
 
+    def test_rollup_summaries_do_not_link_to_themselves(self):
+        report = self.make_report()
+        report.check_url = "https://github.test/plan"
+        report.apply_check_url = "https://github.test/apply"
+        report.mark_apply("def1", "applied")
+        assert "https://github.test/plan" not in report.render_check_summary()
+        apply_summary = report.render_apply_summary()
+        assert "[View plan check run](https://github.test/plan)" in apply_summary
+        assert "https://github.test/apply" not in apply_summary
+
     def test_apply_summary_lists_applied_definitions(self):
         report = self.make_report()
         report.ensure("untouched")
@@ -1820,3 +1833,316 @@ class TestDetailsUrl:
         assert "details_url" not in handler._check.edit.call_args.kwargs
         assert warn.call_count == 1
         assert "details url template" in warn.call_args.args[0]
+
+
+def logs(definition="", from_ts=700000, to_ts=22600000, label="View logs"):
+    """The expected logs link line; defaults are a clock started and read at 1000s."""
+    return f"[{label}]({details(definition, from_ts, to_ts)})"
+
+
+class TestLogsLink:
+    """Check run output carries a labelled logs link: rollups in their header,
+    per-definition checks at the top of their concluded summary."""
+
+    setup_plan = TestDetailsUrl.setup_plan
+    run = TestDetailsUrl.run
+
+    def handler(self, clock=None, **config):
+        config.setdefault("logs_url", DETAILS_TEMPLATE)
+        handler = make_handler(config=make_config(**config), clock=clock or FakeClock())
+        handler._app_state.root_options.run_id = "run-1234"
+        return handler
+
+    def test_config_env_fallbacks(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_CHECK_LOGS_URL", "https://logs.example.com/a")
+        monkeypatch.setenv(
+            "GITHUB_CHECK_DEFINITION_LOGS_URL", "https://logs.example.com/b"
+        )
+        monkeypatch.setenv("GITHUB_CHECK_LOGS_LABEL", "Logs")
+        config = GithubConfig()
+        assert config.logs_url == "https://logs.example.com/a"
+        assert config.definition_logs_url == "https://logs.example.com/b"
+        assert config.logs_label == "Logs"
+
+    def test_config_wins_over_env_and_empty_renders_fall_back(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_CHECK_LOGS_URL", "https://logs.example.com/a")
+        monkeypatch.setenv("GITHUB_CHECK_LOGS_LABEL", "Logs")
+        config = GithubConfig(
+            logs_url="https://logs.example.com/c",
+            definition_logs_url="",
+            logs_label="Run logs",
+        )
+        assert config.logs_url == "https://logs.example.com/c"
+        assert config.definition_logs_url is None
+        assert config.logs_label == "Run logs"
+        assert GithubConfig(logs_label="").logs_label == "Logs"
+
+    def test_default_label(self):
+        config = GithubConfig()
+        assert config.logs_url is None
+        assert config.logs_label == "View logs"
+
+    def test_plan_rollup_links_logs_in_its_header(self):
+        handler = self.handler()
+        self.setup_plan(handler)
+        rollup, per_def = handler._repo.create_check_run.call_args_list
+        summary = rollup.kwargs["output"]["summary"]
+        assert f"Run `run-1234`\n\n{logs()}\n" in summary
+        # a check created without output gets none just for the link
+        assert "output" not in per_def.kwargs
+
+    def test_plan_checks_concluded_with_the_run_window(self):
+        clock = FakeClock()
+        handler = self.handler(clock=clock)
+        clock.now = 1060.0
+        self.run(
+            handler,
+            TerraformAction.PLAN,
+            TerraformStage.POST,
+            TerraformResult(2, PLAN_STDOUT, b""),
+        )
+        summary = handler._def_checks["mydef"].edit.call_args.kwargs["output"][
+            "summary"
+        ]
+        assert summary.startswith(f"{logs('mydef', to_ts=1360000)}\n\n```diff\n")
+        # the rollup re-render while running keeps the open window
+        running = handler._check.edit.call_args.kwargs["output"]["summary"]
+        assert logs(to_ts=22660000) in running
+
+        clock.now = 1120.0
+        handler.teardown("dep", "/tmp")
+        kwargs = handler._check.edit.call_args.kwargs
+        assert kwargs["status"] == "completed"
+        assert logs(to_ts=1420000) in kwargs["output"]["summary"]
+
+    def test_skipped_definition_check_is_just_the_link(self):
+        handler = self.handler()
+        handler.teardown("dep", "/tmp")
+        output = handler._def_checks["mydef"].edit.call_args.kwargs["output"]
+        assert output["summary"] == logs("mydef", to_ts=1300000)
+
+    def test_apply_checks(self):
+        clock = FakeClock()
+        handler = self.handler(clock=clock)
+        rollup = mock.Mock(html_url="https://github.test/apply")
+        per_def = mock.Mock(html_url="https://github.test/apply/mydef")
+        handler._repo.create_check_run.side_effect = [rollup, per_def]
+
+        self.run(handler, TerraformAction.APPLY, TerraformStage.PRE)
+        created = handler._repo.create_check_run.call_args_list
+        assert logs() in created[0].kwargs["output"]["summary"]
+        assert "output" not in created[1].kwargs
+        assert logs() in rollup.edit.call_args.kwargs["output"]["summary"]
+
+        clock.now = 1060.0
+        self.run(
+            handler,
+            TerraformAction.APPLY,
+            TerraformStage.POST,
+            TerraformResult(0, APPLY_STDOUT, b""),
+        )
+        summary = per_def.edit.call_args.kwargs["output"]["summary"]
+        assert summary.startswith(
+            f"{logs('mydef', to_ts=1360000)} · "
+            "[View dep apply check run](https://github.test/apply)\n\n```\n"
+        )
+
+        clock.now = 1120.0
+        handler.teardown("dep", "/tmp")
+        kwargs = rollup.edit.call_args.kwargs
+        assert kwargs["status"] == "completed"
+        assert logs(to_ts=1420000) in kwargs["output"]["summary"]
+
+    def test_definition_template_preferred_for_definition_checks(self):
+        handler = self.handler(
+            definition_logs_url="https://logs.example.com/def/{definition}"
+        )
+        assert handler._logs_link() == logs(to_ts=22600000)
+        assert handler._logs_link("mydef") == (
+            "[View logs](https://logs.example.com/def/mydef)"
+        )
+
+    def test_definition_checks_fall_back_to_the_rollup_template(self):
+        handler = self.handler()
+        assert handler._logs_link("mydef") == logs("mydef")
+
+    def test_definition_template_alone_leaves_rollups_unlinked(self):
+        handler = self.handler(
+            logs_url=None,
+            definition_logs_url="https://logs.example.com/def/{definition}",
+        )
+        assert handler._logs_link() == ""
+        assert handler._logs_link("mydef") == (
+            "[View logs](https://logs.example.com/def/mydef)"
+        )
+
+    def test_env_templates_and_label_are_applied(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_CHECK_LOGS_URL", "https://logs.example.com/r")
+        monkeypatch.setenv(
+            "GITHUB_CHECK_DEFINITION_LOGS_URL",
+            "https://logs.example.com/d/{definition}",
+        )
+        monkeypatch.setenv("GITHUB_CHECK_LOGS_LABEL", "Logs")
+        handler = make_handler(clock=FakeClock())
+        handler._app_state.root_options.run_id = None
+        assert handler._logs_link() == "[Logs](https://logs.example.com/r)"
+        assert handler._logs_link("mydef") == "[Logs](https://logs.example.com/d/mydef)"
+
+    def test_custom_label(self):
+        handler = self.handler(logs_label="Search logs")
+        assert handler._logs_link() == logs(label="Search logs")
+
+    def test_values_are_url_quoted(self):
+        handler = self.handler(
+            logs_url="https://logs.example.com/?r={run_id}&d={deployment}&n={definition}"
+        )
+        handler._app_state.root_options.run_id = "run 1/2"
+        handler._deployment = "a&b"
+        assert handler._logs_link("x y#z") == (
+            "[View logs](https://logs.example.com/?r=run%201%2F2&d=a%26b&n=x%20y%23z)"
+        )
+
+    def test_no_templates_leave_output_unchanged(self):
+        handler = make_handler(clock=FakeClock())
+        handler._app_state.root_options.run_id = "run-1234"
+        self.setup_plan(handler)
+        self.run(
+            handler,
+            TerraformAction.PLAN,
+            TerraformStage.POST,
+            TerraformResult(0, b"No changes.", b""),
+        )
+        handler.teardown("dep", "/tmp")
+        calls = handler._repo.create_check_run.call_args_list + [
+            *handler._repo.create_check_run.return_value.edit.call_args_list
+        ]
+        outputs = [str(c.kwargs.get("output", "")) for c in calls]
+        assert outputs
+        assert not any("View logs" in o for o in outputs)
+
+    def test_status_comment_has_no_logs_link(self):
+        handler = self.handler()
+        handler._update_comments()
+        assert "View logs" not in handler._issue.create_comment.call_args.args[0]
+
+    def test_bad_template_warns_once_and_is_omitted(self):
+        handler = self.handler(logs_url="https://logs.example.com/{unknown}")
+        with mock.patch("tfworker.handlers.github.log.warn") as warn:
+            self.setup_plan(handler)
+            self.run(
+                handler,
+                TerraformAction.PLAN,
+                TerraformStage.POST,
+                TerraformResult(0, b"No changes.", b""),
+            )
+            handler.teardown("dep", "/tmp")
+        assert handler.is_ready() is True
+        edits = handler._repo.create_check_run.return_value.edit.call_args_list
+        assert edits
+        assert not any("View logs" in str(c.kwargs.get("output")) for c in edits)
+        assert warn.call_count == 1
+        assert "logs url template" in warn.call_args.args[0]
+
+    def test_details_url_unaffected(self):
+        handler = self.handler(details_url="https://docs.example.com/{deployment}")
+        self.setup_plan(handler)
+        rollup, per_def = handler._repo.create_check_run.call_args_list
+        assert rollup.kwargs["details_url"] == "https://docs.example.com/dep"
+        assert per_def.kwargs["details_url"] == "https://docs.example.com/dep"
+        assert logs() in rollup.kwargs["output"]["summary"]
+
+    def test_logs_templates_alone_set_no_details_url(self):
+        handler = self.handler()
+        self.setup_plan(handler)
+        created = handler._repo.create_check_run.call_args_list
+        assert all("details_url" not in c.kwargs for c in created)
+
+
+class TestRollupBackLinks:
+    """Per-definition check runs link back to their rollup check run."""
+
+    def test_definition_plan_check_links_to_the_plan_rollup(self):
+        handler = make_handler()
+        handler._report.check_url = "https://github.test/check/1"
+        handler._conclude_def_check("mydef", "success", "No changes.")
+        summary = handler._def_checks["mydef"].edit.call_args.kwargs["output"][
+            "summary"
+        ]
+        assert summary == "[View dep plan check run](https://github.test/check/1)"
+
+    def test_definition_apply_check_links_to_the_apply_rollup(self):
+        handler = make_handler()
+        handler._report.apply_check_url = "https://github.test/apply"
+        per_def = mock.Mock()
+        handler._apply_checks = {"mydef": per_def}
+        handler._conclude_apply_check("mydef", "success", "done", "LOG")
+        summary = per_def.edit.call_args.kwargs["output"]["summary"]
+        assert summary == "[View dep apply check run](https://github.test/apply)\n\nLOG"
+
+    def test_omitted_when_the_rollup_is_unknown(self):
+        handler = make_handler()
+        handler._conclude_def_check("mydef", "failure", "failed", "ERR")
+        output = handler._def_checks["mydef"].edit.call_args.kwargs["output"]
+        assert output["summary"] == "ERR"
+        per_def = mock.Mock()
+        handler._apply_checks = {"mydef": per_def}
+        handler._report = None
+        handler._conclude_apply_check("mydef", "success", "done", "LOG")
+        assert per_def.edit.call_args.kwargs["output"]["summary"] == "LOG"
+
+    def test_setup_links_definition_checks_to_the_created_rollup(self):
+        handler = make_handler()
+        handler._app_state.root_options.run_id = None
+        rollup = mock.Mock(html_url="https://github.test/plan")
+        per_def = mock.Mock(html_url="https://github.test/plan/mydef")
+        handler._repo.create_check_run.side_effect = [rollup, per_def]
+        TestDetailsUrl.setup_plan(None, handler)
+        handler.teardown("dep", "/tmp")
+        output = per_def.edit.call_args.kwargs["output"]
+        assert (
+            output["summary"] == "[View dep plan check run](https://github.test/plan)"
+        )
+        assert (
+            "https://github.test/plan)"
+            not in rollup.edit.call_args.kwargs["output"]["summary"]
+        )
+
+    def test_links_are_stripped_when_read_back(self):
+        handler = TestLoadRunState().handler_with_runs(
+            check_run(10, "tfworker/dep/plan", external_id="run-1"),
+            check_run(
+                11,
+                "tfworker/dep/plan: a",
+                title="Plan: 1 to add",
+                summary="[View logs](https://l/a) · [View dep plan check run](https://p)"
+                "\n\nDIFF",
+                external_id="run-1",
+            ),
+            check_run(
+                12,
+                "tfworker/dep/plan: b",
+                title="No changes.",
+                summary="[View logs](https://l/b)",
+                external_id="run-1",
+            ),
+            check_run(
+                13,
+                "tfworker/dep/plan: c",
+                title="Plan: 1 to add",
+                summary="[Other](https://x)\n\nKEEP",
+                external_id="run-1",
+            ),
+            check_run(
+                20,
+                "tfworker/dep/apply: a",
+                title="Apply complete!",
+                summary="[View dep apply check run](https://a)\n\nLOG",
+                external_id="run-1",
+            ),
+        )
+        handler._load_run_state("run-1")
+        rows = handler._report.rows
+        assert rows["a"].detail == "DIFF"
+        assert rows["b"].detail == ""
+        assert rows["c"].detail == "[Other](https://x)\n\nKEEP"
+        assert rows["a"].apply_detail == "LOG"

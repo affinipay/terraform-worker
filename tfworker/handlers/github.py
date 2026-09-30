@@ -28,9 +28,11 @@ variables, so an empty mapping works in GitHub Actions with a configured app)::
         pull_request: "{{ env.PR_NUMBER }}" # or GITHUB_PULL_REQUEST / PULL_REQUEST
         app_id: "12345"                     # or GITHUB_APP_ID
         private_key_file: /secrets/app.pem  # or private_key / GITHUB_APP_PRIVATE_KEY(_FILE)
-        # check run "details" links; placeholders: run_id, deployment, definition, from_ts, to_ts
-        details_url: "https://logs.example.com/search?q=run%3A{run_id}&from={from_ts}&to={to_ts}"
-        definition_details_url: "https://logs.example.com/search?q=run%3A{run_id}%20def%3A{definition}"
+        # check run links; placeholders: run_id, deployment, definition, from_ts, to_ts
+        details_url: "https://docs.example.com/deployments/{deployment}"
+        logs_url: "https://logs.example.com/search?q=run%3A{run_id}&from={from_ts}&to={to_ts}"
+        definition_logs_url: "https://logs.example.com/search?q=run%3A{run_id}%20def%3A{definition}"
+        logs_label: "View logs"
 """
 
 import os
@@ -71,7 +73,7 @@ BODY_BUDGET = 60000
 DETAIL_CHUNK_LIMIT = BODY_BUDGET - 1000
 # consecutive API failures before the handler disables itself
 MAX_API_FAILURES = 3
-# details_url windows, in seconds: margin around the run, and the open end of a running check
+# check run link windows, in seconds: margin around the run, and the open end of a running check
 DETAILS_URL_MARGIN = 5 * 60
 DETAILS_URL_RUNNING_WINDOW = 6 * 60 * 60
 
@@ -235,6 +237,18 @@ class GithubConfig(BaseModel):
         default=None,
         description="Template for the per-definition check runs' details link, with the placeholders of details_url; falls back to GITHUB_CHECK_DEFINITION_DETAILS_URL, then details_url.",
     )
+    logs_url: str | None = Field(
+        default=None,
+        description="Template for a labelled logs link in the rollup check runs' output, with the placeholders of details_url; falls back to GITHUB_CHECK_LOGS_URL.",
+    )
+    definition_logs_url: str | None = Field(
+        default=None,
+        description="Template for the logs link in the per-definition check runs' output; falls back to GITHUB_CHECK_DEFINITION_LOGS_URL, then logs_url.",
+    )
+    logs_label: str | None = Field(
+        default=None,
+        description="Text of the logs link; falls back to GITHUB_CHECK_LOGS_LABEL, then 'View logs'.",
+    )
     comment_marker: str = "tfworker-status"
     comment_details: bool = Field(
         default=False,
@@ -264,6 +278,9 @@ class GithubConfig(BaseModel):
         "apply_check_run_name",
         "details_url",
         "definition_details_url",
+        "logs_url",
+        "definition_logs_url",
+        "logs_label",
         mode="before",
     )
     @classmethod
@@ -292,6 +309,15 @@ class GithubConfig(BaseModel):
             self.definition_details_url
             or os.environ.get("GITHUB_CHECK_DEFINITION_DETAILS_URL")
             or None
+        )
+        self.logs_url = self.logs_url or os.environ.get("GITHUB_CHECK_LOGS_URL") or None
+        self.definition_logs_url = (
+            self.definition_logs_url
+            or os.environ.get("GITHUB_CHECK_DEFINITION_LOGS_URL")
+            or None
+        )
+        self.logs_label = (
+            self.logs_label or os.environ.get("GITHUB_CHECK_LOGS_LABEL") or "View logs"
         )
         if self.pull_request is None:
             self.pull_request = _env_int(
@@ -464,14 +490,20 @@ class GithubStatusReport:
         statuses = (r.apply_status for r in self._rows.values() if r.apply_status)
         return self._count(statuses, APPLY_DISPLAY)
 
-    def _header(self, kind: str = "plan", include_apply: bool = False) -> str:
+    def _header(
+        self,
+        kind: str = "plan",
+        include_apply: bool = False,
+        logs_link: str = "",
+        include_plan: bool = True,
+    ) -> str:
         lines = [f"## Terraform {kind} status: `{self.deployment}`", ""]
         if self.run_id:
             # the id the stored plans are keyed by, so an apply can request exactly these plans
             lines.append(f"Run `{self.run_id}`")
             lines.append("")
-        links = []
-        if self.check_url:
+        links = [logs_link] if logs_link else []
+        if include_plan and self.check_url:
             links.append(f"[View plan check run]({self.check_url})")
         if include_apply and self.apply_check_url:
             links.append(f"[View apply check run]({self.apply_check_url})")
@@ -577,15 +609,15 @@ class GithubStatusReport:
                 )
         return bodies
 
-    def render_check_summary(self) -> str:
+    def render_check_summary(self, logs_link: str = "") -> str:
         """The rollup check run output markdown."""
-        body = "\n".join(
-            [self._header(), self._table(), ""] + self._check_detail_blocks()
-        )
+        # the rollup's own page: no link to itself
+        header = self._header(logs_link=logs_link, include_plan=False)
+        body = "\n".join([header, self._table(), ""] + self._check_detail_blocks())
         if len(body) > BODY_BUDGET:
             body = "\n".join(
                 [
-                    self._header(),
+                    header,
                     self._table(),
                     "",
                     "_Detail sections omitted; body exceeded GitHub's size limit._",
@@ -593,9 +625,13 @@ class GithubStatusReport:
             )
         return body
 
-    def render_apply_summary(self) -> str:
+    def render_apply_summary(self, logs_link: str = "") -> str:
         """The apply rollup check run output markdown."""
-        head = [self._header(kind="apply"), self._apply_table(), ""]
+        head = [
+            self._header(kind="apply", logs_link=logs_link),
+            self._apply_table(),
+            "",
+        ]
         blocks = []
         for name, row in self._rows.items():
             if row.apply_status is None or not row.apply_detail:
@@ -760,7 +796,7 @@ class GithubHandler(BaseHandler):
                 status="in_progress",
                 output={
                     "title": "Terraform plan in progress",
-                    "summary": self.report.render_check_summary(),
+                    "summary": self.report.render_check_summary(self._logs_link()),
                 },
                 **self._external_id(),
                 **self._details_url(),
@@ -822,7 +858,9 @@ class GithubHandler(BaseHandler):
                         conclusion=conclusion,
                         output={
                             "title": title,
-                            "summary": self.report.render_check_summary(),
+                            "summary": self.report.render_check_summary(
+                                self._logs_link(concluded=True)
+                            ),
                         },
                         **self._details_url(concluded=True),
                     )
@@ -840,7 +878,9 @@ class GithubHandler(BaseHandler):
                     conclusion=conclusion,
                     output={
                         "title": f"Terraform apply {conclusion}: {summary_line}",
-                        "summary": self.report.render_apply_summary(),
+                        "summary": self.report.render_apply_summary(
+                            self._logs_link(concluded=True)
+                        ),
                     },
                     **self._details_url(concluded=True),
                 )
@@ -1033,7 +1073,7 @@ class GithubHandler(BaseHandler):
             status="in_progress",
             output={
                 "title": "Terraform apply in progress",
-                "summary": self.report.render_apply_summary(),
+                "summary": self.report.render_apply_summary(self._logs_link()),
             },
             **self._external_id(),
             **self._details_url(),
@@ -1094,12 +1134,70 @@ class GithubHandler(BaseHandler):
     def _details_url(
         self, definition: str | None = None, concluded: bool = False
     ) -> dict[str, Any]:
-        """Check run kwargs linking it to the run's logs; a concluded check's window closes at conclusion."""
-        template = self.config.details_url
+        """Check run kwargs setting its details link."""
+        url = self._check_url(
+            "details",
+            self.config.details_url,
+            self.config.definition_details_url,
+            definition,
+            concluded,
+        )
+        return {"details_url": url} if url else {}
+
+    def _logs_link(self, definition: str | None = None, concluded: bool = False) -> str:
+        """The labelled markdown logs link for a check run's output; empty without a template."""
+        url = self._check_url(
+            "logs",
+            self.config.logs_url,
+            self.config.definition_logs_url,
+            definition,
+            concluded,
+        )
+        return f"[{self.config.logs_label}]({url})" if url else ""
+
+    def _rollup_label(self, kind: str) -> str:
+        return f"View {self._deployment} {kind} check run"
+
+    def _with_links(self, summary: str, definition: str, kind: str) -> str:
+        """A concluded per-definition check's summary, headed by its logs and rollup links."""
+        report = self._report
+        rollup_url = None
+        if report is not None:
+            rollup_url = report.check_url if kind == "plan" else report.apply_check_url
+        links = [self._logs_link(definition, concluded=True)]
+        if rollup_url:
+            links.append(f"[{self._rollup_label(kind)}]({rollup_url})")
+        line = " · ".join(link for link in links if link)
+        if not line:
+            return summary
+        return f"{line}\n\n{summary}" if summary else line
+
+    def _without_links(self, summary: str | None) -> str:
+        """A per-definition check summary read back without the links line heading it."""
+        summary = summary or ""
+        first, _, rest = summary.partition("\n\n")
+        labels = [self.config.logs_label, *map(self._rollup_label, ("plan", "apply"))]
+        links = first.split(" · ")
+        if "\n" not in first and all(
+            link.endswith(")") and any(link.startswith(f"[{lb}](") for lb in labels)
+            for link in links
+        ):
+            return rest
+        return summary
+
+    def _check_url(
+        self,
+        kind: str,
+        template: str | None,
+        definition_template: str | None,
+        definition: str | None,
+        concluded: bool,
+    ) -> str | None:
+        """Render a check run link template; a concluded check's window closes at conclusion."""
         if definition is not None:
-            template = self.config.definition_details_url or template
+            template = definition_template or template
         if not template or template in self._bad_templates:
-            return {}
+            return None
         window = DETAILS_URL_MARGIN if concluded else DETAILS_URL_RUNNING_WINDOW
         values = {
             "run_id": quote(self._run_id() or "", safe=""),
@@ -1109,13 +1207,13 @@ class GithubHandler(BaseHandler):
             "to_ts": int((self._clock() + window) * 1000),
         }
         try:
-            return {"details_url": template.format(**values)}
+            return template.format(**values)
         except (KeyError, IndexError, ValueError, AttributeError, TypeError) as e:
             self._bad_templates.add(template)
             log.warn(
-                f"github handler: ignoring details url template {template!r}: {e!r}"
+                f"github handler: ignoring {kind} url template {template!r}: {e!r}"
             )
-            return {}
+            return None
 
     def _resolve_sha(self, for_apply: bool = False) -> str:
         """The commit to report on: commit_sha, then the PR head or GITHUB_SHA, whichever the action prefers."""
@@ -1209,20 +1307,20 @@ class GithubHandler(BaseHandler):
                 applies[run.name.removeprefix(apply_prefix)] = run
         for name, run in plans.items():
             status, plan_line = self._plan_status(run)
-            summary = run.output.summary if run.output else ""
-            self.report.mark(name, status, plan_line=plan_line, detail=summary or "")
+            summary = self._without_links(run.output.summary if run.output else "")
+            self.report.mark(name, status, plan_line=plan_line, detail=summary)
             self.report.set_url(name, run.html_url)
         for name, run in applies.items():
             apply_status = self._apply_status(run)
             if apply_status is None:
                 continue
             title = (run.output.title if run.output else "") or ""
-            summary = run.output.summary if run.output else ""
+            summary = self._without_links(run.output.summary if run.output else "")
             self.report.mark_apply(
                 name,
                 apply_status,
                 apply_line=title.strip() if apply_status == "applied" else "",
-                detail=summary or "",
+                detail=summary,
             )
             self.report.set_apply_url(name, run.html_url)
         return True
@@ -1276,16 +1374,14 @@ class GithubHandler(BaseHandler):
     def _update_check(self, title: str) -> None:
         if self._check is None or self._report is None:
             return
-        self._check.edit(
-            output={"title": title, "summary": self.report.render_check_summary()}
-        )
+        summary = self.report.render_check_summary(self._logs_link())
+        self._check.edit(output={"title": title, "summary": summary})
 
     def _update_apply_check(self, title: str) -> None:
         if self._apply_check is None or self._report is None:
             return
-        self._apply_check.edit(
-            output={"title": title, "summary": self.report.render_apply_summary()}
-        )
+        summary = self.report.render_apply_summary(self._logs_link())
+        self._apply_check.edit(output={"title": title, "summary": summary})
 
     def _conclude_def_check(
         self, name: str, conclusion: str, title: str, summary: str = ""
@@ -1300,7 +1396,9 @@ class GithubHandler(BaseHandler):
             conclusion=conclusion,
             output={
                 "title": title[:255],
-                "summary": _fence_safe_truncate(summary, BODY_BUDGET),
+                "summary": _fence_safe_truncate(
+                    self._with_links(summary, name, "plan"), BODY_BUDGET
+                ),
             },
             **self._details_url(name, concluded=True),
         )
@@ -1315,7 +1413,9 @@ class GithubHandler(BaseHandler):
         self._apply_concluded.add(name)
         output = {
             "title": title[:255],
-            "summary": _fence_safe_truncate(summary, BODY_BUDGET),
+            "summary": _fence_safe_truncate(
+                self._with_links(summary, name, "apply"), BODY_BUDGET
+            ),
         }
         plan = self.report.ensure(name).detail if self._report else ""
         if plan:
