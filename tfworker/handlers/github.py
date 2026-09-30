@@ -28,14 +28,19 @@ variables, so an empty mapping works in GitHub Actions with a configured app)::
         pull_request: "{{ env.PR_NUMBER }}" # or GITHUB_PULL_REQUEST / PULL_REQUEST
         app_id: "12345"                     # or GITHUB_APP_ID
         private_key_file: /secrets/app.pem  # or private_key / GITHUB_APP_PRIVATE_KEY(_FILE)
+        # check run "details" links; placeholders: run_id, deployment, definition, from_ts, to_ts
+        details_url: "https://logs.example.com/search?q=run%3A{run_id}&from={from_ts}&to={to_ts}"
+        definition_details_url: "https://logs.example.com/search?q=run%3A{run_id}%20def%3A{definition}"
 """
 
 import os
 import re
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Mapping
+from urllib.parse import quote
 
 import click
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -66,6 +71,9 @@ BODY_BUDGET = 60000
 DETAIL_CHUNK_LIMIT = BODY_BUDGET - 1000
 # consecutive API failures before the handler disables itself
 MAX_API_FAILURES = 3
+# details_url windows, in seconds: margin around the run, and the open end of a running check
+DETAILS_URL_MARGIN = 5 * 60
+DETAILS_URL_RUNNING_WINDOW = 6 * 60 * 60
 
 
 def _hard_wrap(text: str, width: int) -> str:
@@ -219,6 +227,14 @@ class GithubConfig(BaseModel):
         default=None,
         description="Name of the apply check run; defaults to 'tfworker/<deployment>/apply'.",
     )
+    details_url: str | None = Field(
+        default=None,
+        description="Template for the rollup check runs' details link; falls back to GITHUB_CHECK_DETAILS_URL. str.format placeholders: {run_id}, {deployment}, {definition} (empty), {from_ts} and {to_ts} (epoch ms).",
+    )
+    definition_details_url: str | None = Field(
+        default=None,
+        description="Template for the per-definition check runs' details link, with the placeholders of details_url; falls back to GITHUB_CHECK_DEFINITION_DETAILS_URL, then details_url.",
+    )
     comment_marker: str = "tfworker-status"
     comment_details: bool = Field(
         default=False,
@@ -246,6 +262,8 @@ class GithubConfig(BaseModel):
         "installation_id",
         "check_run_name",
         "apply_check_run_name",
+        "details_url",
+        "definition_details_url",
         mode="before",
     )
     @classmethod
@@ -265,6 +283,14 @@ class GithubConfig(BaseModel):
         self.private_key_file = (
             self.private_key_file
             or os.environ.get("GITHUB_APP_PRIVATE_KEY_FILE")
+            or None
+        )
+        self.details_url = (
+            self.details_url or os.environ.get("GITHUB_CHECK_DETAILS_URL") or None
+        )
+        self.definition_details_url = (
+            self.definition_details_url
+            or os.environ.get("GITHUB_CHECK_DEFINITION_DETAILS_URL")
             or None
         )
         if self.pull_request is None:
@@ -610,8 +636,13 @@ class GithubHandler(BaseHandler):
         TerraformAction.PLAN: {TerraformStage.POST: ["openai"]},
     }
 
-    def __init__(self, config: GithubConfig) -> None:
+    def __init__(
+        self, config: GithubConfig, clock: Callable[[], float] = time.time
+    ) -> None:
         self.config = config
+        self._clock = clock
+        self._started_at = clock()
+        self._bad_templates: set[str] = set()
         self._app_state = None
         self._repo: "Repository | None" = None
         self._pr: "PullRequest | None" = None
@@ -702,6 +733,7 @@ class GithubHandler(BaseHandler):
             return
         self._planning = bool(terraform_options.plan)
         self._deployment = deployment
+        self._started_at = self._clock()
         try:
             self._connect()
             run_id = self._run_id()
@@ -731,6 +763,7 @@ class GithubHandler(BaseHandler):
                     "summary": self.report.render_check_summary(),
                 },
                 **self._external_id(),
+                **self._details_url(),
             )
             self.report.check_url = self._check.html_url
             for defn in definitions.values():
@@ -739,6 +772,7 @@ class GithubHandler(BaseHandler):
                     head_sha=self._head_sha,
                     status="queued",
                     **self._external_id(),
+                    **self._details_url(defn.name),
                 )
                 self._def_checks[defn.name] = check
                 self.report.set_url(defn.name, check.html_url)
@@ -790,6 +824,7 @@ class GithubHandler(BaseHandler):
                             "title": title,
                             "summary": self.report.render_check_summary(),
                         },
+                        **self._details_url(concluded=True),
                     )
             except Exception as e:
                 log.error(f"github handler plan teardown failed: {e}")
@@ -807,6 +842,7 @@ class GithubHandler(BaseHandler):
                         "title": f"Terraform apply {conclusion}: {summary_line}",
                         "summary": self.report.render_apply_summary(),
                     },
+                    **self._details_url(concluded=True),
                 )
             except Exception as e:
                 log.error(f"github handler apply teardown failed: {e}")
@@ -941,6 +977,7 @@ class GithubHandler(BaseHandler):
             head_sha=self._head_sha,
             status="in_progress",
             **self._external_id(),
+            **self._details_url(name),
         )
         self._apply_checks[name] = check
         self.report.set_apply_url(name, check.html_url)
@@ -999,6 +1036,7 @@ class GithubHandler(BaseHandler):
                 "summary": self.report.render_apply_summary(),
             },
             **self._external_id(),
+            **self._details_url(),
         )
         self.report.apply_check_url = self._apply_check.html_url
 
@@ -1052,6 +1090,32 @@ class GithubHandler(BaseHandler):
         """Check run kwargs tagging it with the run id."""
         run_id = self._run_id()
         return {"external_id": run_id} if run_id else {}
+
+    def _details_url(
+        self, definition: str | None = None, concluded: bool = False
+    ) -> dict[str, Any]:
+        """Check run kwargs linking it to the run's logs; a concluded check's window closes at conclusion."""
+        template = self.config.details_url
+        if definition is not None:
+            template = self.config.definition_details_url or template
+        if not template or template in self._bad_templates:
+            return {}
+        window = DETAILS_URL_MARGIN if concluded else DETAILS_URL_RUNNING_WINDOW
+        values = {
+            "run_id": quote(self._run_id() or "", safe=""),
+            "deployment": quote(self._deployment, safe=""),
+            "definition": quote(definition or "", safe=""),
+            "from_ts": int((self._started_at - DETAILS_URL_MARGIN) * 1000),
+            "to_ts": int((self._clock() + window) * 1000),
+        }
+        try:
+            return {"details_url": template.format(**values)}
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError) as e:
+            self._bad_templates.add(template)
+            log.warn(
+                f"github handler: ignoring details url template {template!r}: {e!r}"
+            )
+            return {}
 
     def _resolve_sha(self, for_apply: bool = False) -> str:
         """The commit to report on: commit_sha, then the PR head or GITHUB_SHA, whichever the action prefers."""
@@ -1238,6 +1302,7 @@ class GithubHandler(BaseHandler):
                 "title": title[:255],
                 "summary": _fence_safe_truncate(summary, BODY_BUDGET),
             },
+            **self._details_url(name, concluded=True),
         )
 
     def _conclude_apply_check(
@@ -1257,7 +1322,12 @@ class GithubHandler(BaseHandler):
             output["text"] = _fence_safe_truncate(
                 f"### Applied plan\n\n{plan}", BODY_BUDGET
             )
-        check.edit(status="completed", conclusion=conclusion, output=output)
+        check.edit(
+            status="completed",
+            conclusion=conclusion,
+            output=output,
+            **self._details_url(name, concluded=True),
+        )
 
     def _record_api_failure(self, context: str, exc: Exception) -> None:
         self._api_failures += 1
