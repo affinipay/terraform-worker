@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import click
+import pytest
 from click.testing import CliRunner
 
 from tfworker.cli_options import CLIOptionsRoot, CLIOptionsTerraform
@@ -140,6 +141,42 @@ class TestLoadConfigDefinitionsSources:
         loaded = c.load_config(str(cfg), {"deployment": "d"})
         apply.assert_not_called()
         assert loaded.definitions_sources == {}
+
+    def test_source_failure_exits(self, tmp_path, mocker, mock_click_context):
+        cfg = self._write(tmp_path)
+        (tmp_path / "catalog" / "list").write_text("#!/bin/sh\necho boom >&2\nexit 2\n")
+        error = mocker.patch("tfworker.util.log.error")
+        work = tmp_path / "work"
+        work.mkdir()
+        with pytest.raises(SystemExit):
+            c.load_config(
+                str(cfg),
+                {"deployment": "d", "repository_path": str(tmp_path)},
+                working_dir=work,
+            )
+        mock_click_context.exit.assert_called_once_with(1)
+        message = error.call_args.args[0]
+        assert "local" in message
+        assert "exited 2" in message
+        assert "boom" in message
+
+    def test_invalid_source_block_exits(self, tmp_path, mocker, mock_click_context):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "terraform:\n"
+            "  definitions_sources:\n"
+            "    local:\n"
+            "      path: catalog\n"
+            "      command: ./list\n"
+            "      bogus: true\n"
+        )
+        error = mocker.patch("tfworker.util.log.error")
+        with pytest.raises(SystemExit):
+            c.load_config(str(cfg), {"deployment": "d"}, working_dir=tmp_path)
+        mock_click_context.exit.assert_called_once_with(1)
+        message = error.call_args.args[0]
+        assert "definitions source named local" in message
+        assert "bogus" in message
 
 
 class TestProcessTemplate:

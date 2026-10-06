@@ -17,7 +17,10 @@ from pydantic import BaseModel, ValidationError
 import tfworker.util.log as log
 from tfworker.app_state import AppState
 from tfworker.custom_types.config_file import ConfigFile
-from tfworker.definitions.sources import apply_definitions_sources
+from tfworker.definitions.sources import (
+    DefinitionsSourceError,
+    apply_definitions_sources,
+)
 from tfworker.util.cli import handle_config_error
 
 from .. import cli_options
@@ -51,12 +54,18 @@ def load_config(
         merge(merged_config, loaded)
 
     if merged_config.get("definitions_sources"):
-        apply_definitions_sources(
-            merged_config,
-            config_vars["deployment"],
-            config_vars.get("repository_path", ""),
-            working_dir if working_dir is not None else tempfile.mkdtemp(),
-        )
+        try:
+            apply_definitions_sources(
+                merged_config,
+                config_vars["deployment"],
+                config_vars.get("repository_path", ""),
+                working_dir if working_dir is not None else tempfile.mkdtemp(),
+            )
+        except ValidationError as e:
+            handle_config_error(e)
+        except DefinitionsSourceError as e:
+            log.error(str(e))
+            click.get_current_context().exit(1)
 
     try:
         parsed_config = ConfigFile.model_validate(merged_config)

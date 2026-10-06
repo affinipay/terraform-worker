@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, Union
 
 import yaml
+from pydantic import ValidationError
 
 import tfworker.util.log as log
 from tfworker.copier import CopyFactory
@@ -10,6 +11,10 @@ from tfworker.custom_types.config_file import DefinitionsSource
 from tfworker.util.system import pipe_exec
 
 SOURCES_DIR = "definitions_sources"
+
+
+class DefinitionsSourceError(Exception):
+    """A definitions source could not be fetched, run, or applied."""
 
 
 def apply_definitions_sources(
@@ -28,26 +33,49 @@ def apply_definitions_sources(
         deployment (str): the deployment, passed to commands as WORKER_DEPLOYMENT
         repository_path (str): the root that relative source paths resolve from
         working_dir (Union[str, Path]): the directory sources are fetched under
+
+    Raises:
+        DefinitionsSourceError: a source failed or its output can't be applied
+        ValidationError: a source block is invalid
     """
+    origins: Dict[str, str] = {}
     for name, body in merged_config["definitions_sources"].items():
-        source = DefinitionsSource.model_validate(body)
+        try:
+            source = DefinitionsSource.model_validate(body)
+        except ValidationError as e:
+            e.ctx = ("definitions source", name)
+            raise
+        definitions = merged_config.get("definitions") or {}
+        if source.after is not None and source.after not in definitions:
+            raise DefinitionsSourceError(
+                f"definitions source {name}: after names unknown definition {source.after}"
+            )
         copy_dir = Path(working_dir) / SOURCES_DIR / name
-        _fetch(source, repository_path, copy_dir)
+        _fetch(name, source, repository_path, copy_dir)
         generated = _run(name, source, copy_dir, deployment)
-        for definition in generated.values():
+        for def_name, definition in generated.items():
+            _check_collision(name, def_name, definitions, origins)
+            origins[def_name] = name
             _inherit_location(definition, source)
-        merged_config["definitions"] = _insert(
-            merged_config.get("definitions") or {}, generated, source.after
-        )
+        merged_config["definitions"] = _insert(definitions, generated, source.after)
 
 
-def _fetch(source: DefinitionsSource, repository_path: str, copy_dir: Path) -> None:
+def _fetch(
+    name: str, source: DefinitionsSource, repository_path: str, copy_dir: Path
+) -> None:
     """Copy the source into copy_dir, the same way definitions are fetched."""
-    copier = CopyFactory.create(source.path, root_path=repository_path, conflicts=[])
     options = (
         source.remote_path_options.model_dump() if source.remote_path_options else {}
     )
-    copier.copy(destination=str(copy_dir), **options)
+    try:
+        copier = CopyFactory.create(
+            source.path, root_path=repository_path, conflicts=[]
+        )
+        copier.copy(destination=str(copy_dir), **options)
+    except (NotImplementedError, FileNotFoundError, FileExistsError, RuntimeError) as e:
+        raise DefinitionsSourceError(
+            f"definitions source {name}: unable to fetch {source.path}: {e}"
+        ) from e
 
 
 def _run(
@@ -56,8 +84,63 @@ def _run(
     """Run the source's command in its copy and parse the printed definitions."""
     log.debug(f"running definitions source {name}: {source.command}")
     env = {**os.environ, "WORKER_DEPLOYMENT": deployment}
-    _, stdout, _ = pipe_exec(source.command, cwd=str(copy_dir), env=env)
-    return yaml.safe_load(stdout.decode("utf-8"))
+    try:
+        rc, stdout, stderr = pipe_exec(source.command, cwd=str(copy_dir), env=env)
+    except OSError as e:
+        raise DefinitionsSourceError(
+            f"definitions source {name}: unable to run {source.command}: {e}"
+        ) from e
+    stderr_text = stderr.decode("utf-8", errors="replace")
+    if rc != 0:
+        raise DefinitionsSourceError(
+            f"definitions source {name}: {source.command} exited {rc}\n{stderr_text}"
+        )
+    if stderr_text:
+        log.debug(f"definitions source {name} stderr:\n{stderr_text}")
+    return _parse(name, stdout.decode("utf-8"))
+
+
+def _parse(name: str, output: str) -> Dict[str, Dict[str, Any]]:
+    """Parse command output into a mapping of definition name to body."""
+    try:
+        parsed = yaml.safe_load(output)
+    except yaml.YAMLError as e:
+        raise DefinitionsSourceError(
+            f"definitions source {name}: output is not valid YAML or JSON: {e}"
+        ) from e
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise DefinitionsSourceError(
+            f"definitions source {name}: output must be a mapping of definitions"
+        )
+    for def_name, body in parsed.items():
+        if body is None:
+            parsed[def_name] = body = {}
+        if not isinstance(def_name, str) or not isinstance(body, dict):
+            raise DefinitionsSourceError(
+                f"definitions source {name}: {def_name!r} must be a name mapped to a definition"
+            )
+    return parsed
+
+
+def _check_collision(
+    source_name: str,
+    def_name: str,
+    definitions: Dict[str, Any],
+    origins: Dict[str, str],
+) -> None:
+    """Fail when a generated name is already defined."""
+    if def_name in origins:
+        raise DefinitionsSourceError(
+            f"definition {def_name} generated by both definitions sources "
+            f"{origins[def_name]} and {source_name}"
+        )
+    if def_name in definitions:
+        raise DefinitionsSourceError(
+            f"definitions source {source_name}: generated definition {def_name} "
+            "conflicts with a configured definition"
+        )
 
 
 def _inherit_location(definition: Dict[str, Any], source: DefinitionsSource) -> None:
