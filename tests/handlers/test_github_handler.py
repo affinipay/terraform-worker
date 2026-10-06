@@ -10,6 +10,7 @@ from tfworker.handlers.github import (
     GithubConfig,
     GithubHandler,
     GithubStatusReport,
+    NoCommitError,
     _chunk_markdown,
     _diff_format,
     _fence_safe_truncate,
@@ -316,7 +317,7 @@ class TestGithubHandlerInit:
     @pytest.mark.parametrize("for_apply", [False, True])
     def test_resolve_sha_without_a_commit_raises(self, for_apply):
         handler = make_handler(with_pr=False)
-        with pytest.raises(HandlerError):
+        with pytest.raises(NoCommitError):
             handler._resolve_sha(for_apply=for_apply)
 
 
@@ -1107,7 +1108,48 @@ class TestSetup:
     def test_failure_disables_the_handler(self):
         handler = make_handler()
         handler._repo.create_check_run.side_effect = RuntimeError("bad credentials")
-        run_setup(handler, definitions={})
+        with mock.patch("tfworker.handlers.github.log.error") as error:
+            run_setup(handler, definitions={})
+        assert handler.is_ready() is False
+        assert "bad credentials" in error.call_args.args[0]
+
+    def test_connect_failure_logs_an_error(self):
+        handler = make_handler()
+        with mock.patch("tfworker.handlers.github.log.error") as error:
+            handler._connect = mock.Mock(side_effect=RuntimeError("auth failed"))
+            handler.setup("dep", {}, "/tmp", SimpleNamespace(plan=True, apply=False))
+        assert handler.is_ready() is False
+        assert "auth failed" in error.call_args.args[0]
+
+    @pytest.mark.parametrize("plan, apply", [(True, False), (False, True)])
+    def test_no_commit_skips_without_an_error(self, plan, apply):
+        handler = make_handler(with_pr=False)
+        handler._connect = mock.Mock()
+        with (
+            mock.patch("tfworker.handlers.github.log.error") as error,
+            mock.patch("tfworker.handlers.github.log.info") as info,
+        ):
+            handler.setup(
+                "dep",
+                {"mydef": make_definition()},
+                "/tmp",
+                SimpleNamespace(plan=plan, apply=apply),
+            )
+        error.assert_not_called()
+        info.assert_called_once_with(
+            "github handler: no commit to report on; set commit_sha or GITHUB_SHA; skipping"
+        )
+        assert handler.is_ready() is False
+        assert execute(handler, PLAN, PRE) is None
+        handler.teardown("dep", "/tmp")
+        handler._repo.create_check_run.assert_not_called()
+        handler._plan_checks.rollup.edit.assert_not_called()
+
+    def test_no_commit_raises_when_required(self):
+        handler = make_handler(config=make_config(required=True), with_pr=False)
+        handler._connect = mock.Mock()
+        with pytest.raises(HandlerError, match="no commit to report on"):
+            handler.setup("dep", {}, "/tmp", SimpleNamespace(plan=True, apply=False))
         assert handler.is_ready() is False
 
     def test_failure_raises_when_required(self):
