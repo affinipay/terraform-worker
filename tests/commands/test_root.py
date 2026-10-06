@@ -43,4 +43,5 @@ class TestRootCommandInit:
         RootCommand(deployment="dep")
 
         assert load.call_args.args[1]["deployment"] == "dep"
+        assert load.call_args.kwargs["working_dir"] == tmp_path.resolve()
         assert app_state.loaded_config == load.return_value

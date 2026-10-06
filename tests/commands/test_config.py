@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import click
 from click.testing import CliRunner
 
-from tfworker.cli_options import CLIOptionsRoot
+from tfworker.cli_options import CLIOptionsRoot, CLIOptionsTerraform
 from tfworker.commands import config as c
 from tfworker.custom_types.config_file import ConfigFile
 
@@ -61,6 +61,85 @@ class TestLoadConfig:
         )
         loaded = c.load_config(str(cfg), {"deployment": "my-dep"})
         assert loaded.definitions["a"]["path"] == "/my-dep"
+
+
+class TestLoadConfigDefinitionsSources:
+    SCRIPT = "#!/bin/sh\necho 'generated: {template_vars: {d: '$WORKER_DEPLOYMENT'}}'\n"
+
+    def _write(self, tmp_path):
+        src = tmp_path / "catalog"
+        src.mkdir()
+        script = src / "list"
+        script.write_text(self.SCRIPT)
+        script.chmod(0o755)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "terraform:\n"
+            "  definitions_sources:\n"
+            "    local:\n"
+            "      path: catalog\n"
+            "      command: ./list\n"
+            "      after: base\n"
+            "  definitions:\n"
+            "    base:\n"
+            "      path: ./base\n"
+            "    last:\n"
+            "      path: ./last\n"
+        )
+        return cfg
+
+    def test_generated_definitions_loaded(self, tmp_path):
+        cfg = self._write(tmp_path)
+        work = tmp_path / "work"
+        work.mkdir()
+        loaded = c.load_config(
+            str(cfg),
+            {"deployment": "dep-one", "repository_path": str(tmp_path)},
+            working_dir=work,
+        )
+        assert list(loaded.definitions) == ["base", "generated", "last"]
+        assert loaded.definitions["generated"] == {
+            "template_vars": {"d": "dep-one"},
+            "path": "catalog",
+        }
+        assert loaded.definitions_sources["local"].command == "./list"
+        assert (work / "definitions_sources" / "local" / "list").exists()
+
+    def test_limit_accepts_generated_definition(
+        self, tmp_path, mocker, mock_click_context
+    ):
+        cfg = self._write(tmp_path)
+        work = tmp_path / "work"
+        work.mkdir()
+        loaded = c.load_config(
+            str(cfg),
+            {"deployment": "d", "repository_path": str(tmp_path)},
+            working_dir=work,
+        )
+        mock_click_context.obj.loaded_config = loaded
+        opts = CLIOptionsTerraform(limit=["generated"])
+        assert opts.limit == ["generated"]
+
+    def test_default_working_dir_is_temporary(self, tmp_path, mocker):
+        cfg = self._write(tmp_path)
+        work = tmp_path / "tmpdir"
+        work.mkdir()
+        mocker.patch(
+            "tfworker.commands.config.tempfile.mkdtemp", return_value=str(work)
+        )
+        loaded = c.load_config(
+            str(cfg), {"deployment": "d", "repository_path": str(tmp_path)}
+        )
+        assert "generated" in loaded.definitions
+        assert (work / "definitions_sources" / "local").is_dir()
+
+    def test_without_sources_nothing_runs(self, tmp_path, mocker):
+        apply = mocker.patch("tfworker.commands.config.apply_definitions_sources")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("terraform:\n  definitions:\n    a:\n      path: /a\n")
+        loaded = c.load_config(str(cfg), {"deployment": "d"})
+        apply.assert_not_called()
+        assert loaded.definitions_sources == {}
 
 
 class TestProcessTemplate:
