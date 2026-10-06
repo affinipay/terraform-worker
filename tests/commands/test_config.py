@@ -54,6 +54,14 @@ class TestLoadConfig:
         assert loaded.parallel_options.max_preparation_workers == 2
         assert loaded.parallel_options.max_init_workers == 1
 
+    def test_deployment_template_var(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            """terraform:\n  definitions:\n    a:\n      path: /{{ deployment }}\n"""
+        )
+        loaded = c.load_config(str(cfg), {"deployment": "my-dep"})
+        assert loaded.definitions["a"]["path"] == "/my-dep"
+
 
 class TestProcessTemplate:
     def test_template_vars(self, tmp_path):

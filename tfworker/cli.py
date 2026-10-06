@@ -64,7 +64,7 @@ def clean(ctx: click.Context, deployment: str, **kwargs):  # noqa: E501
     the backend such as S3 buckets, DynamoDB tables, etc. This command will
     verify the state is empty, and then remove those traces from the backend.
     """
-    RootCommand()
+    RootCommand(deployment=deployment)
 
     try:
         options = CLIOptionsClean.model_validate(kwargs)
@@ -93,7 +93,7 @@ def terraform(ctx: click.Context, deployment: str, **kwargs):
     """
     # @TODO: Add support for a --target flag to target specific IDs in a definition
 
-    RootCommand()
+    RootCommand(deployment=deployment)
 
     try:
         options = CLIOptionsTerraform.model_validate(kwargs)
@@ -149,7 +149,7 @@ def env(ctx: click.Context, deployment: str, **kwargs):
     the worker will execute them. This can be helpful when doing manual
     state management
     """
-    RootCommand()
+    RootCommand(deployment=deployment)
     env = EnvCommand(deployment=deployment)
     env.exec()
 
