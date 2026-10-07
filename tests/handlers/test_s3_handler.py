@@ -146,9 +146,33 @@ class TestVerifyLineage:
         self.upload_state(s3, handler.bucket, state_key, serial=2, lineage="y")
         assert handler._verify_lineage(plan, state_key) is False
 
-    def test_state_missing_raises(self, handler_with_bucket, tmp_path):
+    def test_state_missing_empty_plan_state_matches(
+        self, handler_with_bucket, tmp_path
+    ):
+        handler, _ = handler_with_bucket
+        plan = self.create_plan(tmp_path, serial=0, lineage="")
+        assert handler._verify_lineage(plan, "missing") is True
+
+    def test_state_missing_plan_with_state_mismatch(
+        self, handler_with_bucket, tmp_path
+    ):
         handler, _ = handler_with_bucket
         plan = self.create_plan(tmp_path)
+        assert handler._verify_lineage(plan, "missing") is False
+
+    def test_state_download_error_raises(
+        self, handler_with_bucket, tmp_path, monkeypatch
+    ):
+        handler, _ = handler_with_bucket
+        plan = self.create_plan(tmp_path, serial=0, lineage="")
+
+        def raise_error(*args, **kwargs):
+            raise botocore.exceptions.ClientError(
+                {"Error": {"Code": "AccessDenied"}},
+                "GetObject",
+            )
+
+        monkeypatch.setattr(handler.s3_client, "get_object", raise_error)
         with pytest.raises(HandlerError):
             handler._verify_lineage(plan, "missing")
 
@@ -316,6 +340,22 @@ class TestGetPlan:
             assert handler.get_plan(definition) is False
             del_mock.assert_called_once()
         assert not planfile.exists()
+
+    def test_state_missing_plan_with_state_removed(self, handler_with_bucket, tmp_path):
+        handler, s3 = handler_with_bucket
+        planfile = tmp_path / "plan.tfplan"
+        definition = MagicMock()
+        definition.name = "def"
+        definition.plan_file = str(planfile)
+        source_dir = tmp_path / "src"
+        source_dir.mkdir()
+        source = TestVerifyLineage().create_plan(source_dir)
+        remotefile = handler.get_remote_file("def")
+        s3.put_object(Bucket=handler.bucket, Key=remotefile, Body=source.read_bytes())
+
+        assert handler.get_plan(definition) is False
+        assert not planfile.exists()
+        assert s3.list_objects(Bucket=handler.bucket).get("Contents") is None
 
     def test_vanished_after_download_raises(
         self, handler_with_bucket, tmp_path, monkeypatch
