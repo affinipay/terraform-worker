@@ -387,6 +387,7 @@ class TestApplyDefinitionsSourcesErrors:
             RuntimeError("unable to clone"),
             FileNotFoundError("missing"),
             FileExistsError("conflict"),
+            PermissionError("denied"),
         ],
     )
     def test_copy_failure(self, mocker, error):
@@ -413,6 +414,18 @@ class TestApplyDefinitionsSourcesErrors:
             }
         }
         with pytest.raises(s.DefinitionsSourceError, match="local"):
+            s.apply_definitions_sources(config, "d", str(tmp_path))
+
+    def test_file_path_for_real(self, tmp_path, monkeypatch):
+        registry = {k: v for k, v in CopyFactory.registry.items() if k in ("fs", "git")}
+        monkeypatch.setattr(CopyFactory, "registry", registry)
+        (tmp_path / "catalog").write_text("not a directory")
+        config = {
+            "definitions_sources": {
+                "local": {"path": str(tmp_path / "catalog"), "command": "run"}
+            }
+        }
+        with pytest.raises(s.DefinitionsSourceError, match="local: unable to fetch"):
             s.apply_definitions_sources(config, "d", str(tmp_path))
 
     def test_unknown_key_in_source(self, mocker):
@@ -459,13 +472,16 @@ class TestTemporaryCopy:
             s.apply_definitions_sources(_config(), "d", ".")
         assert not os.path.exists(_destination(create))
 
-    def test_removed_after_fetch_failure(self, mocker):
+    @pytest.mark.parametrize(
+        "error", [RuntimeError("unable to clone"), PermissionError("denied")]
+    )
+    def test_removed_after_fetch_failure(self, mocker, error):
         create = self._fetch_into(mocker)
         copy = create.return_value.copy.side_effect
 
         def failing_copy(destination, **kwargs):
             copy(destination)
-            raise RuntimeError("unable to clone")
+            raise error
 
         create.return_value.copy.side_effect = failing_copy
         with pytest.raises(s.DefinitionsSourceError):

@@ -61,7 +61,7 @@ def _fetch(
     try:
         copier = get_coppier(source.path, repository_path, conflicts=[])
         copy(copier, copy_dir, _remote_options(source))
-    except (NotImplementedError, FileNotFoundError, FileExistsError, RuntimeError) as e:
+    except (NotImplementedError, RuntimeError, OSError) as e:
         raise DefinitionsSourceError(
             f"definitions source {name}: unable to fetch {source.path}: {e}"
         ) from e
