@@ -35,6 +35,8 @@ class RootCommand:
             options.config_file,
             self._prepare_template_vars(options, deployment),
             working_dir=app_state.working_dir,
+            deployment=deployment,
+            repository_path=options.repository_path,
         )
         log.safe_trace(f"loaded config: {app_state.loaded_config}")
         # update the app_config with configuration from the command line

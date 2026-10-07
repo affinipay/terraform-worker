@@ -1,32 +1,11 @@
 import json
 import os
-import stat
 
 import pytest
 from pydantic import ValidationError
 
 from tfworker.copier import CopyFactory
 from tfworker.definitions import sources as s
-
-SCRIPT = """#!/bin/sh
-cat <<EOF
-generated:
-  template_vars:
-    cwd: $(pwd)
-    deployment: $WORKER_DEPLOYMENT
-    inherited: $SOURCE_TEST_VAR
-EOF
-"""
-
-
-def _make_source(tmp_path, script=SCRIPT, name="bin/list-definitions"):
-    """A local source dir holding an executable script."""
-    src = tmp_path / "catalog"
-    script_path = src / name
-    script_path.parent.mkdir(parents=True)
-    script_path.write_text(script)
-    script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
-    return src
 
 
 def _stdout(mocker, *outputs):
@@ -39,15 +18,15 @@ def _stdout(mocker, *outputs):
 
 def _copier(mocker):
     """Patch the copier factory; returns the mocked create."""
-    return mocker.patch("tfworker.definitions.sources.CopyFactory.create")
+    return mocker.patch.object(CopyFactory, "create")
 
 
 class TestApplyDefinitionsSourcesLocal:
-    def test_runs_command_in_fetched_copy(self, tmp_path, monkeypatch):
+    def test_runs_command_in_fetched_copy(
+        self, tmp_path, monkeypatch, definitions_source, work_dir
+    ):
         monkeypatch.setenv("SOURCE_TEST_VAR", "from-env")
-        src = _make_source(tmp_path)
-        work = tmp_path / "work"
-        work.mkdir()
+        src = definitions_source
         config = {
             "definitions": {"base": {"path": "./base"}},
             "definitions_sources": {
@@ -55,9 +34,9 @@ class TestApplyDefinitionsSourcesLocal:
             },
         }
 
-        s.apply_definitions_sources(config, "my-deployment", str(tmp_path), work)
+        s.apply_definitions_sources(config, "my-deployment", str(tmp_path), work_dir)
 
-        copy_dir = work / "definitions_sources" / "local"
+        copy_dir = work_dir / "definitions_sources" / "local"
         assert (copy_dir / "bin" / "list-definitions").exists()
         generated = config["definitions"]["generated"]
         assert generated["template_vars"] == {
@@ -69,10 +48,9 @@ class TestApplyDefinitionsSourcesLocal:
         assert list(config["definitions"]) == ["base", "generated"]
         assert os.environ.get("WORKER_DEPLOYMENT") != "my-deployment"
 
-    def test_relative_path_resolves_against_repository_path(self, tmp_path):
-        _make_source(tmp_path)
-        work = tmp_path / "work"
-        work.mkdir()
+    def test_relative_path_resolves_against_repository_path(
+        self, tmp_path, definitions_source, work_dir
+    ):
         config = {
             "definitions": {},
             "definitions_sources": {
@@ -80,7 +58,7 @@ class TestApplyDefinitionsSourcesLocal:
             },
         }
 
-        s.apply_definitions_sources(config, "d", str(tmp_path), work)
+        s.apply_definitions_sources(config, "d", str(tmp_path), work_dir)
 
         assert config["definitions"]["generated"]["path"] == "catalog"
 
@@ -255,7 +233,6 @@ class TestApplyDefinitionsSourcesMocked:
         create.return_value.copy.assert_called_once_with(
             destination=str(tmp_path / "definitions_sources" / "src"),
             branch="feature",
-            sub_path=None,
         )
 
     def test_no_remote_options_copies_without_options(self, mocker, tmp_path):
@@ -311,30 +288,30 @@ class TestApplyDefinitionsSourcesErrors:
         with pytest.raises(s.DefinitionsSourceError, match="src"):
             s.apply_definitions_sources(_config(), "d", ".", tmp_path)
 
-    def test_missing_executable_for_real(self, tmp_path):
-        src = _make_source(tmp_path)
-        work = tmp_path / "work"
-        work.mkdir()
+    def test_missing_executable_for_real(self, definitions_source, work_dir):
         config = {
             "definitions_sources": {
-                "local": {"path": str(src), "command": "bin/does-not-exist"}
+                "local": {
+                    "path": str(definitions_source),
+                    "command": "bin/does-not-exist",
+                }
             }
         }
         with pytest.raises(s.DefinitionsSourceError, match="local"):
-            s.apply_definitions_sources(config, "d", ".", work)
+            s.apply_definitions_sources(config, "d", ".", work_dir)
 
-    def test_non_executable_for_real(self, tmp_path):
-        src = _make_source(tmp_path)
-        (src / "bin" / "list-definitions").chmod(0o644)
-        work = tmp_path / "work"
-        work.mkdir()
+    def test_non_executable_for_real(self, definitions_source, work_dir):
+        (definitions_source / "bin" / "list-definitions").chmod(0o644)
         config = {
             "definitions_sources": {
-                "local": {"path": str(src), "command": "bin/list-definitions"}
+                "local": {
+                    "path": str(definitions_source),
+                    "command": "bin/list-definitions",
+                }
             }
         }
         with pytest.raises(s.DefinitionsSourceError, match="local"):
-            s.apply_definitions_sources(config, "d", ".", work)
+            s.apply_definitions_sources(config, "d", ".", work_dir)
 
     @pytest.mark.parametrize(
         "output",
@@ -436,7 +413,8 @@ class TestApplyDefinitionsSourcesErrors:
         with pytest.raises(s.DefinitionsSourceError, match="local"):
             s.apply_definitions_sources(config, "d", str(tmp_path), tmp_path)
 
-    def test_unknown_key_in_source(self, tmp_path):
-        with pytest.raises(ValidationError) as e:
+    def test_unknown_key_in_source(self, mocker, tmp_path):
+        create = _copier(mocker)
+        with pytest.raises(ValidationError):
             s.apply_definitions_sources(_config(bogus=1), "d", ".", tmp_path)
-        assert e.value.ctx == ("definitions source", "src")
+        create.assert_not_called()

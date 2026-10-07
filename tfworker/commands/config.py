@@ -3,7 +3,6 @@ import io
 import json
 import os
 import pathlib
-import tempfile
 from typing import Any, Dict, List, Type, Union
 
 import click
@@ -17,10 +16,8 @@ from pydantic import BaseModel, ValidationError
 import tfworker.util.log as log
 from tfworker.app_state import AppState
 from tfworker.custom_types.config_file import ConfigFile
-from tfworker.definitions.sources import (
-    DefinitionsSourceError,
-    apply_definitions_sources,
-)
+from tfworker.definitions.sources import apply_definitions_sources
+from tfworker.exceptions import DefinitionsSourceError
 from tfworker.util.cli import handle_config_error
 
 from .. import cli_options
@@ -29,12 +26,14 @@ from .. import cli_options
 def load_config(
     config_file: Union[str, List[str]],
     config_vars: Dict[str, str],
-    working_dir: Union[str, pathlib.Path, None] = None,
+    working_dir: Union[str, pathlib.Path],
+    deployment: str,
+    repository_path: str,
 ) -> ConfigFile:
     """Load one or more configuration files and merge them.
 
     Later files override values from earlier ones. Definitions sources are
-    fetched under working_dir (a new temporary directory when unset).
+    fetched under working_dir, resolved from repository_path, and run for deployment.
     """
 
     config_files = [config_file] if isinstance(config_file, str) else config_file
@@ -57,9 +56,9 @@ def load_config(
         try:
             apply_definitions_sources(
                 merged_config,
-                config_vars["deployment"],
-                config_vars.get("repository_path", ""),
-                working_dir if working_dir is not None else tempfile.mkdtemp(),
+                deployment,
+                repository_path,
+                working_dir,
             )
         except ValidationError as e:
             handle_config_error(e)

@@ -1,6 +1,6 @@
 import json
 from os import environ
-from typing import TYPE_CHECKING, Dict, Union
+from typing import TYPE_CHECKING, Dict, List, Union
 
 import jinja2
 
@@ -307,13 +307,16 @@ class DefinitionPrepare:
         }
 
 
-def get_coppier(path: str, root_path: str) -> Copier:
+def get_coppier(
+    path: str, root_path: str, conflicts: Union[List[str], None] = None
+) -> Copier:
     """
     Returns an appropriate copier for the definition path
 
     Args:
         path (str): the path to the definition
         root_path (str): the root path of the repository
+        conflicts (List[str]): files that must not exist in the source; defaults to RESERVED_FILES
 
     Returns:
         Copier: the copier to use
@@ -321,7 +324,9 @@ def get_coppier(path: str, root_path: str) -> Copier:
     Raises:
         NotImplementedError: if there is no copier to handle the path
     """
-    copier = CopyFactory.create(path, root_path=root_path, conflicts=RESERVED_FILES)
+    if conflicts is None:
+        conflicts = RESERVED_FILES
+    copier = CopyFactory.create(path, root_path=root_path, conflicts=conflicts)
     return copier
 
 

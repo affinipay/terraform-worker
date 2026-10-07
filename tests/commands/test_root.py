@@ -29,13 +29,13 @@ class TestRootHelpers:
 
 
 class TestRootCommandInit:
-    def test_load_config_receives_deployment(self, mocker, tmp_path):
-        app_state = mocker.MagicMock()
-        app_state.root_options = CLIOptionsRoot(
-            config_file=[], working_dir=str(tmp_path)
-        )
-        mocker.patch(
-            "click.get_current_context", return_value=mocker.Mock(obj=app_state)
+    def test_load_config_arguments(self, mocker, tmp_path, mock_app_state):
+        repo = tmp_path / "repo"
+        work = tmp_path / "work"
+        repo.mkdir()
+        work.mkdir()
+        mock_app_state.root_options = CLIOptionsRoot(
+            config_file=[], working_dir=str(work), repository_path=str(repo)
         )
         load = mocker.patch("tfworker.commands.root.load_config")
         mocker.patch("tfworker.commands.root.resolve_model_with_cli_options")
@@ -43,5 +43,9 @@ class TestRootCommandInit:
         RootCommand(deployment="dep")
 
         assert load.call_args.args[1]["deployment"] == "dep"
-        assert load.call_args.kwargs["working_dir"] == tmp_path.resolve()
-        assert app_state.loaded_config == load.return_value
+        assert load.call_args.kwargs == {
+            "working_dir": work.resolve(),
+            "deployment": "dep",
+            "repository_path": str(repo),
+        }
+        assert mock_app_state.loaded_config == load.return_value

@@ -6,15 +6,12 @@ import yaml
 from pydantic import ValidationError
 
 import tfworker.util.log as log
-from tfworker.copier import CopyFactory
 from tfworker.custom_types.config_file import DefinitionsSource
+from tfworker.definitions.prepare import copy, get_coppier
+from tfworker.exceptions import DefinitionsSourceError
 from tfworker.util.system import pipe_exec
 
 SOURCES_DIR = "definitions_sources"
-
-
-class DefinitionsSourceError(Exception):
-    """A definitions source could not be fetched, run, or applied."""
 
 
 def apply_definitions_sources(
@@ -64,14 +61,9 @@ def _fetch(
     name: str, source: DefinitionsSource, repository_path: str, copy_dir: Path
 ) -> None:
     """Copy the source into copy_dir, the same way definitions are fetched."""
-    options = (
-        source.remote_path_options.model_dump() if source.remote_path_options else {}
-    )
     try:
-        copier = CopyFactory.create(
-            source.path, root_path=repository_path, conflicts=[]
-        )
-        copier.copy(destination=str(copy_dir), **options)
+        copier = get_coppier(source.path, repository_path, conflicts=[])
+        copy(copier, str(copy_dir), _remote_options(source))
     except (NotImplementedError, FileNotFoundError, FileExistsError, RuntimeError) as e:
         raise DefinitionsSourceError(
             f"definitions source {name}: unable to fetch {source.path}: {e}"
@@ -149,9 +141,14 @@ def _inherit_location(definition: Dict[str, Any], source: DefinitionsSource) -> 
         return
     definition["path"] = source.path
     if source.remote_path_options and "remote_path_options" not in definition:
-        definition["remote_path_options"] = source.remote_path_options.model_dump(
-            exclude_none=True
-        )
+        definition["remote_path_options"] = _remote_options(source)
+
+
+def _remote_options(source: DefinitionsSource) -> Dict[str, Any]:
+    """The source's remote_path_options without unset fields."""
+    if source.remote_path_options is None:
+        return {}
+    return source.remote_path_options.model_dump(exclude_none=True)
 
 
 def _insert(
