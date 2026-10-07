@@ -301,8 +301,9 @@ definitions are therefore treated like configured ones everywhere, including by 
 
 For each source, in configuration order:
 
-#. The source is copied to ``<working-dir>/definitions_sources/<name>``. With ``sub_path``, only that
-   subdirectory is copied.
+#. The source is copied to a temporary directory, which is removed once its command has run, whether it
+   succeeds or fails; nothing is written to the working directory. With ``sub_path``, only that subdirectory is
+   copied.
 #. ``command`` runs in the copy. The command is part of the configuration, so it is rendered with Jinja like
    everything else; it is split into arguments shell-style and run without a shell, so pipes and redirection
    are not available. A relative executable such as ``bin/list-definitions`` resolves against the copy and must
