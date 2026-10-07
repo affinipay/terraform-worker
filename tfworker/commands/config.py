@@ -26,14 +26,13 @@ from .. import cli_options
 def load_config(
     config_file: Union[str, List[str]],
     config_vars: Dict[str, str],
-    working_dir: Union[str, pathlib.Path],
     deployment: str,
     repository_path: str,
 ) -> ConfigFile:
     """Load one or more configuration files and merge them.
 
     Later files override values from earlier ones. Definitions sources are
-    fetched under working_dir, resolved from repository_path, and run for deployment.
+    resolved from repository_path and run for deployment.
     """
 
     config_files = [config_file] if isinstance(config_file, str) else config_file
@@ -58,7 +57,6 @@ def load_config(
                 merged_config,
                 deployment,
                 repository_path,
-                working_dir,
             )
         except ValidationError as e:
             handle_config_error(e)

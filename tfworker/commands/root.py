@@ -34,7 +34,6 @@ class RootCommand:
         app_state.loaded_config = load_config(
             options.config_file,
             self._prepare_template_vars(options, deployment),
-            working_dir=app_state.working_dir,
             deployment=deployment,
             repository_path=options.repository_path,
         )

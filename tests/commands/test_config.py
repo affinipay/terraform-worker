@@ -19,7 +19,7 @@ class TestLoadConfig:
             """terraform:\n  worker_options:\n    foo: bar\n  definitions:\n    a:
       path: /a\n"""
         )
-        loaded = c.load_config(str(cfg), {}, tmp_path, "d", str(tmp_path))
+        loaded = c.load_config(str(cfg), {}, "d", str(tmp_path))
         assert isinstance(loaded, ConfigFile)
         assert "a" in loaded.definitions
 
@@ -33,7 +33,7 @@ class TestLoadConfig:
         cfg2.write_text(
             """terraform:\n  worker_options:\n    b: two\n  definitions:\n    mod:\n      path: /new\n    extra:\n      path: /x\n"""
         )
-        loaded = c.load_config([str(cfg1), str(cfg2)], {}, tmp_path, "d", str(tmp_path))
+        loaded = c.load_config([str(cfg1), str(cfg2)], {}, "d", str(tmp_path))
         assert loaded.worker_options["a"] == "one"
         assert loaded.worker_options["b"] == "two"
         assert loaded.definitions["mod"]["path"] == "/new"
@@ -42,7 +42,7 @@ class TestLoadConfig:
     def test_parallel_options_defaults(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("""terraform:\n  definitions:\n    a:\n      path: /a\n""")
-        loaded = c.load_config(str(cfg), {}, tmp_path, "d", str(tmp_path))
+        loaded = c.load_config(str(cfg), {}, "d", str(tmp_path))
         assert loaded.parallel_options.max_preparation_workers == 8
         assert loaded.parallel_options.max_init_workers == 4
 
@@ -51,7 +51,7 @@ class TestLoadConfig:
         cfg.write_text(
             """terraform:\n  parallel_options:\n    max_preparation_workers: 2\n    max_init_workers: 1\n  definitions:\n    a:\n      path: /a\n"""
         )
-        loaded = c.load_config(str(cfg), {}, tmp_path, "d", str(tmp_path))
+        loaded = c.load_config(str(cfg), {}, "d", str(tmp_path))
         assert loaded.parallel_options.max_preparation_workers == 2
         assert loaded.parallel_options.max_init_workers == 1
 
@@ -61,7 +61,7 @@ class TestLoadConfig:
             """terraform:\n  definitions:\n    a:\n      path: /{{ deployment }}\n"""
         )
         loaded = c.load_config(
-            str(cfg), {"deployment": "my-dep"}, tmp_path, "my-dep", str(tmp_path)
+            str(cfg), {"deployment": "my-dep"}, "my-dep", str(tmp_path)
         )
         assert loaded.definitions["a"]["path"] == "/my-dep"
 
@@ -84,36 +84,32 @@ class TestLoadConfigDefinitionsSources:
         )
         return cfg
 
-    def test_generated_definitions_loaded(self, tmp_path, definitions_source, work_dir):
+    def test_generated_definitions_loaded(self, tmp_path, definitions_source):
         cfg = self._write(tmp_path)
-        loaded = c.load_config(str(cfg), {}, work_dir, "dep-one", str(tmp_path))
+        loaded = c.load_config(str(cfg), {}, "dep-one", str(tmp_path))
         assert list(loaded.definitions) == ["base", "generated", "last"]
         generated = loaded.definitions["generated"]
         assert generated["template_vars"]["deployment"] == "dep-one"
         assert generated["path"] == "catalog"
         assert loaded.definitions_sources["local"].command == "bin/list-definitions"
-        assert (work_dir / "definitions_sources" / "local" / "bin").is_dir()
 
-    def test_repository_path_config_var_ignored(
-        self, tmp_path, definitions_source, work_dir
-    ):
+    def test_repository_path_config_var_ignored(self, tmp_path, definitions_source):
         cfg = self._write(tmp_path)
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         loaded = c.load_config(
             str(cfg),
             {"repository_path": str(elsewhere)},
-            work_dir,
             "d",
             str(tmp_path),
         )
         assert "generated" in loaded.definitions
 
     def test_limit_accepts_generated_definition(
-        self, tmp_path, definitions_source, work_dir, mock_click_context
+        self, tmp_path, definitions_source, mock_click_context
     ):
         cfg = self._write(tmp_path)
-        loaded = c.load_config(str(cfg), {}, work_dir, "d", str(tmp_path))
+        loaded = c.load_config(str(cfg), {}, "d", str(tmp_path))
         mock_click_context.obj.loaded_config = loaded
         opts = CLIOptionsTerraform(limit=["generated"])
         assert opts.limit == ["generated"]
@@ -122,12 +118,12 @@ class TestLoadConfigDefinitionsSources:
         apply = mocker.patch("tfworker.commands.config.apply_definitions_sources")
         cfg = tmp_path / "config.yaml"
         cfg.write_text("terraform:\n  definitions:\n    a:\n      path: /a\n")
-        loaded = c.load_config(str(cfg), {}, tmp_path, "d", str(tmp_path))
+        loaded = c.load_config(str(cfg), {}, "d", str(tmp_path))
         apply.assert_not_called()
         assert loaded.definitions_sources == {}
 
     def test_source_failure_exits(
-        self, tmp_path, mocker, mock_click_context, definitions_source, work_dir
+        self, tmp_path, mocker, mock_click_context, definitions_source
     ):
         cfg = self._write(tmp_path)
         (definitions_source / "bin" / "list-definitions").write_text(
@@ -135,7 +131,7 @@ class TestLoadConfigDefinitionsSources:
         )
         error = mocker.patch("tfworker.util.log.error")
         with pytest.raises(SystemExit):
-            c.load_config(str(cfg), {}, work_dir, "d", str(tmp_path))
+            c.load_config(str(cfg), {}, "d", str(tmp_path))
         mock_click_context.exit.assert_called_once_with(1)
         message = error.call_args.args[0]
         assert "local" in message
@@ -154,7 +150,7 @@ class TestLoadConfigDefinitionsSources:
         )
         error = mocker.patch("tfworker.util.log.error")
         with pytest.raises(SystemExit):
-            c.load_config(str(cfg), {}, tmp_path, "d", str(tmp_path))
+            c.load_config(str(cfg), {}, "d", str(tmp_path))
         mock_click_context.exit.assert_called_once_with(1)
         message = error.call_args.args[0]
         assert "definitions source named local" in message

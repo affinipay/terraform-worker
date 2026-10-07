@@ -1,5 +1,5 @@
 import os
-from pathlib import Path
+import tempfile
 from typing import Any, Dict, Union
 
 import yaml
@@ -11,25 +11,22 @@ from tfworker.definitions.prepare import copy, get_coppier
 from tfworker.exceptions import DefinitionsSourceError
 from tfworker.util.system import pipe_exec
 
-SOURCES_DIR = "definitions_sources"
-
 
 def apply_definitions_sources(
     merged_config: Dict[str, Any],
     deployment: str,
     repository_path: str,
-    working_dir: Union[str, Path],
 ) -> None:
     """
     Run each definitions source and insert the definitions it prints.
 
     Sources run in config order, so later sources see earlier sources' output.
+    Each source is fetched to a temporary directory that is removed after its command runs.
 
     Args:
         merged_config (Dict[str, Any]): the merged, unvalidated config; updated in place
         deployment (str): the deployment, passed to commands as WORKER_DEPLOYMENT
         repository_path (str): the root that relative source paths resolve from
-        working_dir (Union[str, Path]): the directory sources are fetched under
 
     Raises:
         DefinitionsSourceError: a source failed or its output can't be applied
@@ -47,9 +44,9 @@ def apply_definitions_sources(
             raise DefinitionsSourceError(
                 f"definitions source {name}: after names unknown definition {source.after}"
             )
-        copy_dir = Path(working_dir) / SOURCES_DIR / name
-        _fetch(name, source, repository_path, copy_dir)
-        generated = _run(name, source, copy_dir, deployment)
+        with tempfile.TemporaryDirectory(prefix="tfworker-source-") as copy_dir:
+            _fetch(name, source, repository_path, copy_dir)
+            generated = _run(name, source, copy_dir, deployment)
         for def_name, definition in generated.items():
             _check_collision(name, def_name, definitions, origins)
             origins[def_name] = name
@@ -58,12 +55,12 @@ def apply_definitions_sources(
 
 
 def _fetch(
-    name: str, source: DefinitionsSource, repository_path: str, copy_dir: Path
+    name: str, source: DefinitionsSource, repository_path: str, copy_dir: str
 ) -> None:
     """Copy the source into copy_dir, the same way definitions are fetched."""
     try:
         copier = get_coppier(source.path, repository_path, conflicts=[])
-        copy(copier, str(copy_dir), _remote_options(source))
+        copy(copier, copy_dir, _remote_options(source))
     except (NotImplementedError, FileNotFoundError, FileExistsError, RuntimeError) as e:
         raise DefinitionsSourceError(
             f"definitions source {name}: unable to fetch {source.path}: {e}"
@@ -71,13 +68,13 @@ def _fetch(
 
 
 def _run(
-    name: str, source: DefinitionsSource, copy_dir: Path, deployment: str
+    name: str, source: DefinitionsSource, copy_dir: str, deployment: str
 ) -> Dict[str, Dict[str, Any]]:
     """Run the source's command in its copy and parse the printed definitions."""
     log.debug(f"running definitions source {name}: {source.command}")
     env = {**os.environ, "WORKER_DEPLOYMENT": deployment}
     try:
-        rc, stdout, stderr = pipe_exec(source.command, cwd=str(copy_dir), env=env)
+        rc, stdout, stderr = pipe_exec(source.command, cwd=copy_dir, env=env)
     except OSError as e:
         raise DefinitionsSourceError(
             f"definitions source {name}: unable to run {source.command}: {e}"
