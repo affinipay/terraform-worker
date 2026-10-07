@@ -78,6 +78,10 @@ DETAILS_URL_MARGIN = 5 * 60
 DETAILS_URL_RUNNING_WINDOW = 6 * 60 * 60
 
 
+class NoCommitError(HandlerError):
+    """No commit SHA could be resolved."""
+
+
 def _hard_wrap(text: str, width: int) -> str:
     """Hard-wrap long lines, indenting continuations; unbreakable tokens stay intact."""
     if width <= 0:
@@ -797,10 +801,14 @@ class GithubHandler(BaseHandler):
                 self.report.set_url(defn.name, check.html_url)
             self._update_comments()
         except Exception as e:
-            log.error(f"github handler setup failed: {e}")
             self._ready = False
+            if isinstance(e, NoCommitError) and not self.config.required:
+                self._report = None
+                log.info(f"github handler: {e.message}; skipping")
+                return
+            log.error(f"github handler setup failed: {e}")
             if self.config.required:
-                raise HandlerError(f"github handler setup failed: {e}")
+                raise HandlerError(f"github handler setup failed: {e}") from e
 
     def execute(
         self,
@@ -1246,7 +1254,7 @@ class GithubHandler(BaseHandler):
         fallbacks = (env_sha, pr_head) if for_apply else (pr_head, env_sha)
         sha = self.config.commit_sha or next((s for s in fallbacks if s), None)
         if not sha:
-            raise HandlerError("no commit to report on; set commit_sha or GITHUB_SHA")
+            raise NoCommitError("no commit to report on; set commit_sha or GITHUB_SHA")
         return sha
 
     def _claim_comments(self) -> None:

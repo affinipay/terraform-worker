@@ -25,6 +25,36 @@ def aws_credentials():
     os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
 
 
+DEFINITIONS_SOURCE_SCRIPT = """#!/bin/sh
+cat <<EOF
+generated:
+  template_vars:
+    cwd: $(pwd)
+    deployment: $WORKER_DEPLOYMENT
+    inherited: $SOURCE_TEST_VAR
+EOF
+"""
+
+
+@pytest.fixture(scope="function")
+def definitions_source(tmp_path):
+    """A local definitions source, tmp_path/catalog, with an executable bin/list-definitions."""
+    src = tmp_path / "catalog"
+    script = src / "bin" / "list-definitions"
+    script.parent.mkdir(parents=True)
+    script.write_text(DEFINITIONS_SOURCE_SCRIPT)
+    script.chmod(0o755)
+    return src
+
+
+@pytest.fixture(scope="function")
+def work_dir(tmp_path):
+    """An empty working directory under tmp_path."""
+    work = tmp_path / "work"
+    work.mkdir()
+    return work
+
+
 @pytest.fixture(scope="function")
 def empty_state():
     """A Representation of a terraform state file with no resources"""
