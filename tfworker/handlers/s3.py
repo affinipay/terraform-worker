@@ -316,7 +316,10 @@ class S3Handler(BaseHandler):
                 ].read()
             )
         except botocore.exceptions.ClientError as e:
-            raise HandlerError(f"Error downloading statefile: {e}")
+            if e.response["Error"]["Code"] not in ("NoSuchKey", "404"):
+                raise HandlerError(f"Error downloading statefile: {e}")
+            # no prior state; only a plan made against empty state is valid
+            state = None
 
         # load the planfile as a json object
         plan = None
@@ -326,6 +329,9 @@ class S3Handler(BaseHandler):
                     plan = json.loads(f.read())
         except Exception as e:
             raise HandlerError(f"Error loading planfile: {e}")
+
+        if state is None:
+            return bool(plan) and plan.get("serial") == 0 and not plan.get("lineage")
 
         # compare the lineage and serial from the planfile to the statefile
         if not (state and plan):
